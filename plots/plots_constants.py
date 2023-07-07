@@ -102,8 +102,8 @@ legend_handles = [mlines.Line2D([], [], label=approach,
                   marker=id_to_marker[approach + " ResNet 50"],
                   linestyle='None', markersize=5) for approach in legend_approaches]
 legend_handles.append(mlines.Line2D([], [], label="", color="white",linestyle='None', markersize=5))
-legend_handles.append(mlines.Line2D([], [], label="small = ResNet 50", linestyle='None'))
-legend_handles.append(mlines.Line2D([], [], label="big = ViT Medium", linestyle='None'))
+legend_handles.append(mlines.Line2D([], [], label="", linestyle='None'))
+legend_handles.append(mlines.Line2D([], [], label="", linestyle='None'))
 #legend_handles.append(mlines.Line2D([], [], label="grey = non-optimal", linestyle='None'))
 
 # Load data
@@ -169,7 +169,7 @@ chosen = res[
     ((res["Sweep"] == "SNGP ResNet 50") & ((res["Name"] == "chocolate-sweep-6") | (res["Name"] == "crimson-sweep-1") | (res["Name"] ==  "woven-sweep-2"))) |
     ((res["Sweep"] == "SNGP ViT Medium") & ((res["Name"] == "floral-sweep-2") | (res["Name"] == "twilight-sweep-1") | (res["Name"] ==  "classic-sweep-2"))) |
     ((res["Sweep"] == "nivMF ResNet 50") & ((res["Name"] == "rural-sweep-4") | (res["Name"] == "faithful-sweep-1") | (res["Name"] ==  "toasty-sweep-2"))) |
-    ((res["Sweep"] == "nivMF ViT Medium") & ((res["Name"] == "easy-sweep-1") | (res["Name"] == "autumn-sweep-1") | (res["Name"] ==  "solar-sweep-2")))
+    ((res["Sweep"] == "nivMF ViT Medium") & ((res["Name"] == "giddy-sweep-9") | (res["Name"] == "polished-sweep-1") | (res["Name"] ==  "zesty-sweep-2")))
 ]
 chosen_avg = chosen.groupby('Sweep').agg(
     {'best_test_avg_downstream_auroc_correct': ['mean', 'min', 'max'],

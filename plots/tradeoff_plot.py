@@ -27,14 +27,50 @@ with plt.rc_context(bundles.neurips2023()):
                    zorder=3)
 
     plt.legend(handles=legend_handles, bbox_to_anchor=(1.04, 1), loc="upper left", borderaxespad=0)
+    plt.text(0.61, 0.501, 'small = ResNet-50', ha='left', va='top', zorder=10,
+             fontsize=plt.gca().get_legend().get_texts()[0].get_fontsize())
+    plt.text(0.61, 0.495, 'big = ViT-Medium', ha='left', va='top', zorder=10,
+             fontsize=plt.gca().get_legend().get_texts()[0].get_fontsize())
     ax.set_xlabel("Downstream R@1")
     ax.set_ylabel("Downstream R-AUROC")
     ax.grid(zorder=-1, color="lightgrey", lw=0.5)
     plt.savefig("overview_tradeoff.pdf")
-    fig.set_figheight(1.9)
-    plt.savefig("overview_tradeoff_poster.png", dpi=1200)
     plt.close()
 
+with plt.rc_context(bundles.neurips2023()):
+    fig, ax = plt.subplots()
+    fig.set_figheight(2.05)
+    chosen_avg = chosen_avg.sort_values(["Sweep"], ascending=[False])
+    for s, x, y in zip(chosen_avg["Sweep"].to_list(),
+                       chosen_avg["best_test_avg_downstream_r1_mean"].to_list(),
+                       chosen_avg["best_test_avg_downstream_auroc_correct_mean"].to_list()):
+        marker = id_to_marker[s]
+        size = id_to_size[s]
+        color = id_to_col[s]
+        x_r1 = chosen_r1_avg["best_test_avg_downstream_r1_mean"][chosen_r1_avg["Sweep"] == s]
+        y_r1 = chosen_r1_avg["best_test_avg_downstream_auroc_correct_mean"][chosen_r1_avg["Sweep"] == s]
+        ax.plot([x, x_r1],
+                [y, y_r1],
+                c=color,
+                zorder=2)
+
+        ax.scatter([x, x_r1],
+                   [y, y_r1],
+                   marker=marker,
+                   c=color,
+                   s=size,
+                   zorder=3)
+
+    plt.legend(handles=legend_handles, bbox_to_anchor=(1.04, 1), loc="upper left", borderaxespad=0)
+    plt.text(0.61, 0.484, 'small = ResNet-50', ha='left', va='top', zorder=10,
+             fontsize=plt.gca().get_legend().get_texts()[0].get_fontsize())
+    plt.text(0.61, 0.477, 'big = ViT-Medium', ha='left', va='top', zorder=10,
+             fontsize=plt.gca().get_legend().get_texts()[0].get_fontsize())
+    ax.set_xlabel("Downstream R@1")
+    ax.set_ylabel("Downstream R-AUROC")
+    ax.grid(zorder=-1, color="lightgrey", lw=0.5)
+    plt.savefig("overview_tradeoff_poster.png", dpi=1200)
+    plt.close()
 
 # Per model
 for resnet in [True, False]:
