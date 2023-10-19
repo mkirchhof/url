@@ -42,8 +42,10 @@ def update_summary(
         log_wandb=False,
 ):
     rowd = OrderedDict(epoch=epoch)
-    rowd.update([('train_' + k, v) for k, v in train_metrics.items()])
-    rowd.update([('eval_' + k, v) for k, v in eval_metrics.items()])
+    if train_metrics is not None:
+        rowd.update([('train_' + k, v) for k, v in train_metrics.items()])
+    if eval_metrics is not None:
+        rowd.update([('eval_' + k, v) for k, v in eval_metrics.items()])
     if best_eval_metrics is not None:
         rowd.update([('best_eval_' + k, v) for k, v in best_eval_metrics.items()])
     if test_metrics is not None:

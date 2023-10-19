@@ -27,8 +27,8 @@ id_to_col = {
     "HIB ViT Medium": "tab:purple",
     "HET-XL ResNet 50": "tab:brown",
     "HET-XL ViT Medium": "tab:brown",
-    "Riskpred ResNet 50": "tab:pink",
-    "Riskpred ViT Medium": "tab:pink",
+    "Losspred ResNet 50": "tab:pink",
+    "Losspred ViT Medium": "tab:pink",
     "MCDropout ResNet 50": "tab:olive",
     "MCDropout ViT Medium": "tab:olive",
     "Ensemble ResNet 50": "tab:cyan",
@@ -51,8 +51,8 @@ id_to_marker = {
     "HIB ViT Medium": "P",
     "HET-XL ResNet 50": "*",
     "HET-XL ViT Medium": "*",
-    "Riskpred ResNet 50": "H",
-    "Riskpred ViT Medium": "H",
+    "Losspred ResNet 50": "H",
+    "Losspred ViT Medium": "H",
     "MCDropout ResNet 50": "X",
     "MCDropout ViT Medium": "X",
     "Ensemble ResNet 50": "D",
@@ -75,8 +75,8 @@ id_to_size = {
     "HIB ViT Medium": 46.0,
     "HET-XL ResNet 50": 13.0,
     "HET-XL ViT Medium": 54.0,
-    "Riskpred ResNet 50": 14.0,
-    "Riskpred ViT Medium": 46.0,
+    "Losspred ResNet 50": 14.0,
+    "Losspred ViT Medium": 46.0,
     "MCDropout ResNet 50": 11.0,
     "MCDropout ViT Medium": 43.0,
     "Ensemble ResNet 50": 9.0,
@@ -93,7 +93,7 @@ legend_approaches = ["CE",
                 "nivMF",
                 "HIB",
                 "HET-XL",
-                "Riskpred",
+                "Losspred",
                 "MCDropout",
                 "Ensemble",
                 "SNGP"]
@@ -126,8 +126,8 @@ res["Sweep"][(res["loss"] == "hib") & (res["model"] == "resnet50")] = "HIB ResNe
 res["Sweep"][(res["loss"] == "hib") & (res["model"] == "vit_medium_patch16_gap_256")] = "HIB ViT Medium"
 res["Sweep"][res["model"] == "resnet50hetxl"] = "HET-XL ResNet 50"
 res["Sweep"][res["model"] == "vit_medium_patch16_gap_256hetxl"] = "HET-XL ViT Medium"
-res["Sweep"][(res["loss"] == "riskpred") & (res["model"] == "resnet50")] = "Riskpred ResNet 50"
-res["Sweep"][(res["loss"] == "riskpred") & (res["model"] == "vit_medium_patch16_gap_256")] = "Riskpred ViT Medium"
+res["Sweep"][(res["loss"] == "riskpred") & (res["model"] == "resnet50")] = "Losspred ResNet 50"
+res["Sweep"][(res["loss"] == "riskpred") & (res["model"] == "vit_medium_patch16_gap_256")] = "Losspred ViT Medium"
 res["Sweep"][res["model"] == "resnet50dropout"] = "MCDropout ResNet 50"
 res["Sweep"][res["model"] == "vit_medium_patch16_gap_256dropout"] = "MCDropout ViT Medium"
 res["Sweep"][(res["loss"] == "cross-entropy") & (res["model"] == "resnet50") & (res["num-heads"] > 1)] = "Ensemble ResNet 50"
@@ -160,8 +160,8 @@ chosen = res[
     ((res["Sweep"] == "HIB ViT Medium") & ((res["Name"] == "efficient-sweep-7") | (res["Name"] == "logical-sweep-1") | (res["Name"] ==  "pious-sweep-2"))) |
     ((res["Sweep"] == "HET-XL ResNet 50") & ((res["Name"] == "winter-sweep-9") | (res["Name"] == "lucky-sweep-1") | (res["Name"] ==  "genial-sweep-2"))) |
     ((res["Sweep"] == "HET-XL ViT Medium") & ((res["Name"] == "expert-sweep-18") | (res["Name"] == "breezy-sweep-1") | (res["Name"] ==  "graceful-sweep-2"))) |
-    ((res["Sweep"] == "Riskpred ResNet 50") & ((res["Name"] == "absurd-sweep-6") | (res["Name"] == "generous-sweep-1") | (res["Name"] ==  "clean-sweep-2"))) |
-    ((res["Sweep"] == "Riskpred ViT Medium") & ((res["Name"] == "jolly-sweep-9") | (res["Name"] == "smooth-sweep-1") | (res["Name"] ==  "soft-sweep-2"))) |
+    ((res["Sweep"] == "Losspred ResNet 50") & ((res["Name"] == "absurd-sweep-6") | (res["Name"] == "generous-sweep-1") | (res["Name"] ==  "clean-sweep-2"))) |
+    ((res["Sweep"] == "Losspred ViT Medium") & ((res["Name"] == "jolly-sweep-9") | (res["Name"] == "smooth-sweep-1") | (res["Name"] ==  "soft-sweep-2"))) |
     ((res["Sweep"] == "MCDropout ResNet 50") & ((res["Name"] == "glorious-sweep-9") | (res["Name"] == "lucky-sweep-1") | (res["Name"] ==  "serene-sweep-2"))) |
     ((res["Sweep"] == "MCDropout ViT Medium") & ((res["Name"] == "deft-sweep-1") | (res["Name"] == "still-sweep-1") | (res["Name"] ==  "distinctive-sweep-2"))) |
     ((res["Sweep"] == "Ensemble ResNet 50") & ((res["Name"] == "desert-sweep-6") | (res["Name"] == "firm-sweep-1") | (res["Name"] ==  "scarlet-sweep-2"))) |
@@ -193,8 +193,8 @@ chosen_r1 = res[
     ((res["Sweep"] == "HIB ViT Medium") & ((res["Name"] == "polar-sweep-4") | (res["Name"] == "polished-sweep-1") | (res["Name"] ==  "northern-sweep-2"))) |
     ((res["Sweep"] == "HET-XL ResNet 50") & ((res["Name"] == "different-sweep-4") | (res["Name"] == "lilac-sweep-1") | (res["Name"] ==  "toasty-sweep-2"))) |
     ((res["Sweep"] == "HET-XL ViT Medium") & ((res["Name"] == "expert-sweep-18") | (res["Name"] == "breezy-sweep-1") | (res["Name"] ==  "graceful-sweep-2"))) |
-    ((res["Sweep"] == "Riskpred ResNet 50") & ((res["Name"] == "ethereal-sweep-10") | (res["Name"] == "absurd-sweep-1") | (res["Name"] ==  "hardy-sweep-2"))) |
-    ((res["Sweep"] == "Riskpred ViT Medium") & ((res["Name"] == "solar-sweep-10") | (res["Name"] == "driven-sweep-1") | (res["Name"] ==  "rose-sweep-2"))) |
+    ((res["Sweep"] == "Losspred ResNet 50") & ((res["Name"] == "ethereal-sweep-10") | (res["Name"] == "absurd-sweep-1") | (res["Name"] ==  "hardy-sweep-2"))) |
+    ((res["Sweep"] == "Losspred ViT Medium") & ((res["Name"] == "solar-sweep-10") | (res["Name"] == "driven-sweep-1") | (res["Name"] ==  "rose-sweep-2"))) |
     ((res["Sweep"] == "MCDropout ResNet 50") & ((res["Name"] == "glorious-sweep-9") | (res["Name"] == "lucky-sweep-1") | (res["Name"] ==  "serene-sweep-2"))) |
     ((res["Sweep"] == "MCDropout ViT Medium") & ((res["Name"] == "icy-sweep-3") | (res["Name"] == "hardy-sweep-1") | (res["Name"] ==  "sweepy-sweep-2"))) |
     ((res["Sweep"] == "Ensemble ResNet 50") & ((res["Name"] == "devout-sweep-1") | (res["Name"] == "robust-sweep-1") | (res["Name"] ==  "fluent-sweep-2"))) |

@@ -22,7 +22,6 @@ except ImportError:
     has_qmnist = False
 try:
     from torchvision.datasets import ImageNet
-    from .readers.reader_imagenetrealh import SoftImageNet
     has_imagenet = True
 except ImportError:
     has_imagenet = False
@@ -72,8 +71,6 @@ def create_dataset(
         batch_size=None,
         seed=42,
         repeats=0,
-        real_labels="",
-        soft_labels="",
         **kwargs
 ):
     """ Dataset factory method
@@ -142,6 +139,8 @@ def create_dataset(
             assert has_imagenet, 'Please update to a newer PyTorch and torchvision for ImageNet dataset.'
             if split in _EVAL_SYNONYM:
                 split = 'val'
+            if "n_few_shot" in torch_kwargs:
+                torch_kwargs.pop("n_few_shot")
             ds = ImageNet(split=split, **torch_kwargs)
         elif name == 'image_folder' or name == 'folder':
             # in case torchvision ImageFolder is preferred over timm ImageDataset for some reason
@@ -179,21 +178,16 @@ def create_dataset(
             **kwargs
         )
     elif name.startswith('soft/') or name.startswith('repr/'):
-        if name.split('/', 2)[-1] == "imagenet":
-            assert has_imagenet, 'Please update to a newer PyTorch and torchvision for ImageNet dataset.'
-            assert split in _EVAL_SYNONYM, "soft/imagenet is only available for the validation dataset"
-            ds = SoftImageNet(root, path_soft_labels=soft_labels, path_real_labels=real_labels, **kwargs)
-        else:
-            ds = IterableImageDataset(
-                root,
-                reader=name,
-                split=split,
-                is_training=is_training,
-                batch_size=batch_size,
-                repeats=repeats,
-                seed=seed,
-                **kwargs
-            )
+        ds = IterableImageDataset(
+            root,
+            reader=name,
+            split=split,
+            is_training=is_training,
+            batch_size=batch_size,
+            repeats=repeats,
+            seed=seed,
+            **kwargs
+        )
     else:
         # FIXME support more advance split cfg for ImageFolder/Tar datasets in the future
         if search_split and os.path.isdir(root):

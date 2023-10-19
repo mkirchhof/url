@@ -12,7 +12,7 @@ from .img_extensions import get_img_extensions
 
 class ReaderCUB(Reader):
 
-    def __init__(self, root, split="test", **kwargs):
+    def __init__(self, root, split="test", n_few_shot=None, **kwargs):
         """
         root: string, path to root directory of dataset
         split: string, train/validation/test/all. Which folds to use
@@ -59,15 +59,28 @@ class ReaderCUB(Reader):
             self.samples = val_image_dict
         elif split == "test" or split == "trainontest" or split == "testontest":
             self.samples = test_image_dict
+        else:
+            raise NotImplementedError(f"Split {split} is unknown for this dataset.")
+
+        # Reduce dataset into disjoint halves if trainontest or testontest
+        if split == "trainontest" or split == "testontest":
+            min_class_idx = np.min([k for k in self.samples.keys()])
+            self.samples = {k: [v[idx] for idx in np.arange(0 if split == "trainontest" else 1, len(v), 2)] for k, v in self.samples.items()}
+        else:
+            min_class_idx = 0
+
+        # Reduce to evenly spread few-shot samples if that's wanted
+        if n_few_shot is not None:
+            for key in self.samples.keys():
+                n = len(self.samples[key])
+                cur_k = min(n, n_few_shot)
+                stepsize = n // cur_k
+                indices = [i * stepsize for i in range(cur_k)]
+                self.samples[key] = [self.samples[key][i] for i in indices]
+
         # Now flatten all classes into one dict
-        self.samples = [[(x, key) for x in self.samples[key]] for key in self.samples.keys()]
+        self.samples = [[(x, key - min_class_idx) for x in self.samples[key]] for key in self.samples.keys()]
         self.samples = [x for y in self.samples for x in y]
-        if split == "trainontest":
-            min_class_idx = np.min([i[-1] for i in self.samples]).item()
-            self.samples = [(self.samples[i][0], self.samples[i][-1] - min_class_idx) for i in np.arange(0, len(self.samples), 2)]
-        elif split == "testontest":
-            min_class_idx = np.min([i[-1] for i in self.samples]).item()
-            self.samples = [(self.samples[i][0], self.samples[i][-1] - min_class_idx) for i in np.arange(1, len(self.samples), 2)]
 
         if len(self.samples) == 0:
             raise RuntimeError(
@@ -97,7 +110,7 @@ class ReaderCUB(Reader):
 
 class ReaderCARS(Reader):
 
-    def __init__(self, root, split="test", **kwargs):
+    def __init__(self, root, split="test", n_few_shot=None, **kwargs):
         """
         root: string, path to root directory of dataset
         split: string, train/validation/test/all. Which folds to use
@@ -143,15 +156,28 @@ class ReaderCARS(Reader):
             self.samples = val_image_dict
         elif split == "test" or split == "trainontest" or split == "testontest":
             self.samples = test_image_dict
+        else:
+            raise NotImplementedError(f"Split {split} is unknown for this dataset.")
+
+        # Reduce dataset into disjoint halves if trainontest or testontest
+        if split == "trainontest" or split == "testontest":
+            min_class_idx = np.min([k for k in self.samples.keys()])
+            self.samples = {k: [v[idx] for idx in np.arange(0 if split == "trainontest" else 1, len(v), 2)] for k, v in self.samples.items()}
+        else:
+            min_class_idx = 0
+
+        # Reduce to evenly spread few-shot samples if that's wanted
+        if n_few_shot is not None:
+            for key in self.samples.keys():
+                n = len(self.samples[key])
+                cur_k = min(n, n_few_shot)
+                stepsize = n // cur_k
+                indices = [i * stepsize for i in range(cur_k)]
+                self.samples[key] = [self.samples[key][i] for i in indices]
+
         # Now flatten all classes into one dict
-        self.samples = [[(x, key) for x in self.samples[key]] for key in self.samples.keys()]
+        self.samples = [[(x, key - min_class_idx) for x in self.samples[key]] for key in self.samples.keys()]
         self.samples = [x for y in self.samples for x in y]
-        if split == "trainontest":
-            min_class_idx = np.min([i[-1] for i in self.samples]).item()
-            self.samples = [(self.samples[i][0], self.samples[i][-1] - min_class_idx) for i in np.arange(0, len(self.samples), 2)]
-        elif split == "testontest":
-            min_class_idx = np.min([i[-1] for i in self.samples]).item()
-            self.samples = [(self.samples[i][0], self.samples[i][-1] - min_class_idx) for i in np.arange(1, len(self.samples), 2)]
 
         if len(self.samples) == 0:
             raise RuntimeError(
@@ -181,7 +207,7 @@ class ReaderCARS(Reader):
 
 class ReaderSOP(Reader):
 
-    def __init__(self, root, split="test", **kwargs):
+    def __init__(self, root, split="test", n_few_shot=None, **kwargs):
         """
         root: string, path to root directory of dataset
         split: string, train/validation/test/all. Which folds to use
@@ -270,15 +296,28 @@ class ReaderSOP(Reader):
                 test_conversion[class_ix] = img_path.split('/')[-1].split('_')[0]
                 super_test_conversion[class_ix] = img_path.split('/')[-2]
             self.samples = test_image_dict
+        else:
+            raise NotImplementedError(f"Split {split} is unknown for this dataset.")
+
+        # Reduce dataset into disjoint halves if trainontest or testontest
+        if split == "trainontest" or split == "testontest":
+            min_class_idx = np.min([k for k in self.samples.keys()])
+            self.samples = {k: [v[idx] for idx in np.arange(0 if split == "trainontest" else 1, len(v), 2)] for k, v in self.samples.items()}
+        else:
+            min_class_idx = 0
+
+        # Reduce to evenly spread few-shot samples if that's wanted
+        if n_few_shot is not None:
+            for key in self.samples.keys():
+                n = len(self.samples[key])
+                cur_k = min(n, n_few_shot)
+                stepsize = n // cur_k
+                indices = [i * stepsize for i in range(cur_k)]
+                self.samples[key] = [self.samples[key][i] for i in indices]
+
         # Now flatten all classes into one dict
-        self.samples = [[(x, key) for x in self.samples[key]] for key in self.samples.keys()]
+        self.samples = [[(x, key - min_class_idx) for x in self.samples[key]] for key in self.samples.keys()]
         self.samples = [x for y in self.samples for x in y]
-        if split == "trainontest":
-            min_class_idx = np.min([i[-1] for i in self.samples]).item()
-            self.samples = [(self.samples[i][0], self.samples[i][-1] - min_class_idx) for i in np.arange(0, len(self.samples), 2)]
-        elif split == "testontest":
-            min_class_idx = np.min([i[-1] for i in self.samples]).item()
-            self.samples = [(self.samples[i][0], self.samples[i][-1] - min_class_idx) for i in np.arange(1, len(self.samples), 2)]
 
         if len(self.samples) == 0:
             raise RuntimeError(

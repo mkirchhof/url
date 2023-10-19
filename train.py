@@ -30,7 +30,6 @@ import torch.nn as nn
 import torchvision.utils
 import yaml
 from torch.nn.parallel import DistributedDataParallel as NativeDDP
-from torchmetrics.functional.classification import binary_auroc as auroc
 
 from timm import utils
 from timm.data import create_dataset, create_loader, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset, \
@@ -38,11 +37,11 @@ from timm.data import create_dataset, create_loader, resolve_data_config, Mixup,
 from timm.layers import convert_splitbn_model, convert_sync_batchnorm, set_fast_norm
 from timm.loss import JsdCrossEntropy, SoftTargetCrossEntropy, BinaryCrossEntropy, LabelSmoothingCrossEntropy, \
     CrossEntropy, ExpectedLikelihoodKernel, MCInfoNCE, InfoNCE, HedgedInstance, \
-    RiskPrediction, NonIsotropicVMF
+    LossPrediction, NonIsotropicVMF
 from timm.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint, model_parameters
 from timm.optim import create_optimizer_v2, optimizer_kwargs
 from timm.scheduler import create_scheduler_v2, scheduler_kwargs
-from timm.utils import ApexScaler, NativeScaler, str2bool, recall_at_one
+from timm.utils import ApexScaler, NativeScaler, str2bool
 from validate import validate_one_epoch, validate_on_downstream_datasets
 
 try:
@@ -95,18 +94,18 @@ parser.add_argument('--data-dir', metavar='DIR', default="./data/ImageNet2012",
                     help='path to dataset (root dir)')
 parser.add_argument('--dataset', metavar='NAME', default='torch/imagenet',
                     help='dataset type + name ("<type>/<name>") (default: ImageFolder or ImageTar if empty)')
-parser.add_argument('--dataset_eval', metavar='NAME', default='soft/imagenet',
+parser.add_argument('--data-dir-eval', metavar='DIR', default=None,
+                    help='path to root dir where eval dataset is stored. If None, use --data-dir')
+parser.add_argument('--dataset_eval', metavar='NAME', default='torch/imagenet',
                     help='Which dataset to evaluate on (usually the same or a soft label variant of --dataset)')
 parser.add_argument('--data-dir-downstream', metavar='DIR', default="./data",
-                    help='path to root dir where downstream datasets are stored')
+                    help='path to root dir where downstream datasets are stored. If None, use --data-dir')
 parser.add_argument('--dataset-downstream', nargs='+', default=["repr/cub", "repr/cars", "repr/sop"],
                     type=str, help='list dataset type + name ("<type>/<name>") for the zero-shot downstream metrics. To skip downstream evaluation, just provide the same as for dataset_eval.')
-parser.add_argument('--further-dataset-downstream', nargs='+', default=["soft/cifar", "soft/treeversity1", "soft/turkey", "soft/pig", "soft/benthic"],
+parser.add_argument('--further-dataset-downstream', nargs='+', default=[],
                     type=str, help='list dataset type + name ("<type>/<name>") to test performance on some more datasets youre interested in.')
-parser.add_argument('--real-labels', default='./data/real.json', type=str, metavar='FILENAME',
-                    help='Real labels JSON file for imagenet evaluation')
-parser.add_argument('--soft-labels', default='./data/raters.npz', type=str, metavar='FILENAME',
-                    help='raters.npz for ImageNet Real-H soft label evaluation')
+parser.add_argument('--max-num-samples', default=100000, type=int,
+                   help='Maximum number of samples in concatenated ID + OOD dataset (default: 50000)')
 group.add_argument('--train-split', metavar='NAME', default='train',
                    help='dataset train split (train/validation/test/trainontest/testontest). The last two are for experiments where we train on the test classes.')
 group.add_argument('--val-split', metavar='NAME', default='validation',
@@ -117,11 +116,13 @@ group.add_argument('--dataset-download', type=str2bool, default=False,
                    help='Allow download of dataset for torch/ and tfds/ datasets that support it.')
 group.add_argument('--class-map', default='', type=str, metavar='FILENAME',
                    help='path to class to idx mapping file (default: "")')
+group.add_argument('--n_few_shot', default=None, type=int,
+                   help="If not None, to how many samples per class to restrict the train dataset to. Currently only implemented for repr/ datasets.")
 
 # Model parameters
 group = parser.add_argument_group('Model parameters')
 group.add_argument('--loss', default="cross-entropy", type=str,
-                   help="Loss function to use (cross-entropy, elk, nivmf, hib, vmf, mcinfonce, infonce, riskpred)")
+                   help="Loss function to use (cross-entropy, elk, nivmf, hib, vmf, mcinfonce, infonce, losspred)")
 group.add_argument('--ssl', default=False, type=str2bool, help="Whether to train using self-supervised learning.")
 group.add_argument('--model', default='resnet50', type=str, metavar='MODEL',
                    help='Name of model to train (default: "resnet50")')
@@ -141,6 +142,8 @@ group.add_argument('--use-spec-norm', default=False, type=str2bool,
                    help='Whether to use spectral normalization in SNGP (default: False)')
 group.add_argument('--spec-norm-bound', default=6, type=float,
                    help='Spectral normalization multiplier in SNGP (default: 6)')
+group.add_argument('--mc_samples', default=16, type=int,
+                   help="Number of MC samples used to calculate probabilistic losses.")
 parser.add_argument('--unc-module', metavar='NAME', default='pred-net',
                     help='What to use to estimate aleatoric uncertainty (none, class-entropy, jsd, embed-norm, pred-net, hetxl-det)')
 parser.add_argument('--unc_start_value', default=0.001, type=float,
@@ -421,6 +424,17 @@ def _parse_args():
     # defaults will have been overridden if config file specified.
     args = parser.parse_args(remaining)
 
+    # Include this if you are too lazy to specify number of classes in few-shot
+    # if args.n_few_shot is not None:
+    #     args.dataset_eval = args.dataset
+    #     args.dataset_downstream = [args.dataset]
+    #     args.num_classes = {"repr/cub": 100, "repr/cars": 98, "repr/sop": 11318}[args.dataset]
+
+    if args.data_dir_eval is None:
+        args.data_dir_eval = args.data_dir
+    if args.data_dir_downstream is None:
+        args.data_dir_downstream = args.data_dir
+
     # Cache the args as a text string to save them in the output dir later
     args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
     return args, args_text
@@ -644,7 +658,8 @@ def main():
         download=args.dataset_download,
         batch_size=args.batch_size,
         seed=args.seed,
-        repeats=args.epoch_repeats
+        repeats=args.epoch_repeats,
+        n_few_shot=args.n_few_shot,
     )
 
     # Create the validation datasets
@@ -654,25 +669,24 @@ def main():
         eval_workers = min(2, args.workers)
 
     dataset_locations = {}
-    dataset_locations[args.dataset_eval] = (args.data_dir, eval_workers)
+    dataset_locations[args.dataset_eval] = (args.data_dir_eval, eval_workers)
     for dataset in args.dataset_downstream:
         dataset_locations[dataset] = (
         args.data_dir_downstream, 1)
 
     datasets_eval = {}
-    for name, (location, num_workers) in dataset_locations.items():
-        dataset = create_dataset(
-            root=location,
-            name=name,
-            split=args.val_split,
-            download=args.dataset_download,
-            class_map=args.class_map,
-            real_labels=args.real_labels,
-            soft_labels=args.soft_labels,
-            batch_size=args.batch_size,
-            is_training=False
-        )
-        datasets_eval[name] = (dataset, num_workers)
+    if args.val_split is not None and args.val_split != "none":
+        for name, (location, num_workers) in dataset_locations.items():
+            dataset = create_dataset(
+                root=location,
+                name=name,
+                split=args.val_split,
+                download=args.dataset_download,
+                class_map=args.class_map,
+                batch_size=args.batch_size,
+                is_training=False
+            )
+            datasets_eval[name] = (dataset, num_workers)
 
     # Create the test datasets
     dataset_locations_test = {}
@@ -681,40 +695,37 @@ def main():
             args.data_dir_downstream, 1)
 
     datasets_test = {}
-    for name, (location, num_workers) in dataset_locations_test.items():
-        dataset = create_dataset(
-            root=location,
-            name=name,
-            split=args.test_split,
-            download=args.dataset_download,
-            class_map=args.class_map,
-            real_labels=args.real_labels,
-            soft_labels=args.soft_labels,
-            batch_size=args.batch_size,
-            is_training=False
-        )
-        datasets_test[name] = (dataset, num_workers)
-
-    # Create the test datasets
-    dataset_locations_test2 = {}
-    for dataset in args.further_dataset_downstream:
-        dataset_locations_test2[dataset] = (
-            args.data_dir_downstream, 1)
-
     datasets_test2 = {}
-    for name, (location, num_workers) in dataset_locations_test2.items():
-        dataset = create_dataset(
-            root=location,
-            name=name,
-            split=args.test_split,
-            download=args.dataset_download,
-            class_map=args.class_map,
-            real_labels=args.real_labels,
-            soft_labels=args.soft_labels,
-            batch_size=args.batch_size,
-            is_training=False
-        )
-        datasets_test2[name] = (dataset, num_workers)
+    if args.test_split is not None and args.test_split != "none":
+        for name, (location, num_workers) in dataset_locations_test.items():
+            dataset = create_dataset(
+                root=location,
+                name=name,
+                split=args.test_split,
+                download=args.dataset_download,
+                class_map=args.class_map,
+                batch_size=args.batch_size,
+                is_training=False
+            )
+            datasets_test[name] = (dataset, num_workers)
+
+        # Create the test datasets
+        dataset_locations_test2 = {}
+        for dataset in args.further_dataset_downstream:
+            dataset_locations_test2[dataset] = (
+                args.data_dir_downstream, 1)
+
+        for name, (location, num_workers) in dataset_locations_test2.items():
+            dataset = create_dataset(
+                root=location,
+                name=name,
+                split=args.test_split,
+                download=args.dataset_download,
+                class_map=args.class_map,
+                batch_size=args.batch_size,
+                is_training=False
+            )
+            datasets_test2[name] = (dataset, num_workers)
 
     # setup mixup / cutmix
     collate_fn = None
@@ -775,7 +786,7 @@ def main():
         interpolation=train_interpolation,
         mean=data_config['mean'],
         std=data_config['std'],
-        num_workers=args.workers,
+        num_workers=args.workers if not args.n_few_shot else 1,
         distributed=args.distributed,
         collate_fn=collate_fn,
         pin_memory=args.pin_mem,
@@ -870,22 +881,22 @@ def main():
         train_loss_fn = ExpectedLikelihoodKernel(inv_temp=args.inv_temp)
         validate_loss_fn = ExpectedLikelihoodKernel(inv_temp=args.inv_temp)
     elif args.loss == "nivmf":
-        train_loss_fn = NonIsotropicVMF(n_classes=args.num_classes, embed_dim=model.num_features, inv_temp=args.inv_temp)
-        validate_loss_fn = NonIsotropicVMF(n_classes=args.num_classes, embed_dim=model.num_features, inv_temp=args.inv_temp)
+        train_loss_fn = NonIsotropicVMF(n_classes=args.num_classes, embed_dim=model.num_features, inv_temp=args.inv_temp, n_samples=args.mc_samples)
+        validate_loss_fn = NonIsotropicVMF(n_classes=args.num_classes, embed_dim=model.num_features, inv_temp=args.inv_temp, n_samples=args.mc_samples)
     elif args.loss == "mcinfonce":
-        train_loss_fn = MCInfoNCE(kappa_init=args.inv_temp)
+        train_loss_fn = MCInfoNCE(kappa_init=args.inv_temp, n_samples=args.mc_samples)
         validate_loss_fn = CrossEntropy()
     elif args.loss == "infonce":
         train_loss_fn = InfoNCE(kappa_init=args.inv_temp)
         validate_loss_fn = CrossEntropy()
     elif args.loss == "hib":
-        train_loss_fn = HedgedInstance(kappa_init=args.inv_temp, b=args.hib_add_const)
+        train_loss_fn = HedgedInstance(kappa_init=args.inv_temp, b=args.hib_add_const, n_samples=args.mc_samples)
         validate_loss_fn = CrossEntropy()
-    elif args.loss == "riskpred":
-        train_loss_fn = RiskPrediction(lambda_=args.lambda_value)
+    elif args.loss == "losspred":
+        train_loss_fn = LossPrediction(lambda_=args.lambda_value, ignore_ce_loss=args.freeze_backbone)
         validate_loss_fn = CrossEntropy()
     else:
-        raise NotImplementedError("--loss {args.loss} is not implemented.")
+        raise NotImplementedError(f"--loss {args.loss} is not implemented.")
     train_loss_fn = train_loss_fn.to(device=device)
     validate_loss_fn = validate_loss_fn.to(device=device)
 
@@ -965,21 +976,25 @@ def main():
             elif args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
                 loader_train.sampler.set_epoch(epoch)
 
-            train_metrics = train_one_epoch(
-                epoch,
-                model,
-                loader_train,
-                optimizer,
-                train_loss_fn,
-                args,
-                lr_scheduler=lr_scheduler,
-                saver=saver,
-                output_dir=output_dir,
-                amp_autocast=amp_autocast,
-                loss_scaler=loss_scaler,
-                model_ema=model_ema,
-                mixup_fn=mixup_fn
-            )
+            if args.lr > 0:
+                train_metrics = train_one_epoch(
+                    epoch,
+                    model,
+                    loader_train,
+                    optimizer,
+                    train_loss_fn,
+                    args,
+                    lr_scheduler=lr_scheduler,
+                    saver=saver,
+                    output_dir=output_dir,
+                    amp_autocast=amp_autocast,
+                    loss_scaler=loss_scaler,
+                    model_ema=model_ema,
+                    mixup_fn=mixup_fn
+                )
+            else:
+                _logger.info("Learning rate is 0, skipping training epoch.")
+                train_metrics = None
 
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                 if utils.is_primary(args):
@@ -991,7 +1006,11 @@ def main():
                 loader_eval_upstream,
                 validate_loss_fn,
                 args,
-                amp_autocast=amp_autocast
+                amp_autocast=amp_autocast,
+                is_upstream=True,
+                dataset_name=args.dataset_eval,
+                log_suffix=f"Val {args.dataset_eval}",
+                tempfolder=output_dir
             )
             _logger.info(
                 'Upstream * Acc@1 {:.3f} R@1 {:.3f} AUROC-R@1 {:.3f} croppedHasBiggerUnc {:.3f}'.format(
@@ -1003,7 +1022,9 @@ def main():
                     loaders_eval_downstream,
                     validate_loss_fn,
                     args,
-                    amp_autocast=amp_autocast
+                    amp_autocast=amp_autocast,
+                    tempfolder=output_dir,
+                    log_suffix="Val"
                 ))
 
                 _logger.info(
@@ -1024,7 +1045,9 @@ def main():
                         loaders_test,
                         validate_loss_fn,
                         args,
-                        amp_autocast=amp_autocast
+                        amp_autocast=amp_autocast,
+                        tempfolder=output_dir,
+                        log_suffix="Test"
                     )
 
                 if len(loaders_test2) > 0:
@@ -1033,7 +1056,9 @@ def main():
                         loaders_test2,
                         validate_loss_fn,
                         args,
-                        amp_autocast=amp_autocast
+                        amp_autocast=amp_autocast,
+                        tempfolder=output_dir,
+                        log_suffix="Further test"
                     )
 
             if model_ema is not None and not args.model_ema_force_cpu:
@@ -1046,7 +1071,10 @@ def main():
                     validate_loss_fn,
                     args,
                     amp_autocast=amp_autocast,
-                    log_suffix=' (EMA)'
+                    log_suffix=f'Val (EMA) {args.dataset_eval}',
+                    is_upstream=True,
+                    dataset_name=args.dataset,
+                    tempfolder=output_dir
                 )
 
                 if len(loaders_eval_downstream) > 0:
@@ -1055,7 +1083,9 @@ def main():
                         loaders_eval_downstream,
                         validate_loss_fn,
                         args,
-                        amp_autocast=amp_autocast
+                        amp_autocast=amp_autocast,
+                        tempfolder=output_dir,
+                        log_suffix='Val (EMA)'
                     ))
 
                 eval_metrics = ema_eval_metrics
@@ -1119,13 +1149,8 @@ def train_one_epoch(
 
     second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
     batch_time_m = utils.AverageMeter()
-    #data_time_m = utils.AverageMeter()
     losses_m = utils.AverageMeter()
-    #grad_norm_m = utils.AverageMeter()
-    unc_metric_m = utils.AverageMeter()
     accuracy_m = utils.AverageMeter()
-    auroc_m = utils.AverageMeter()
-    recall_m = utils.AverageMeter()
 
     model.train()
     optimizer.zero_grad()
@@ -1155,7 +1180,6 @@ def train_one_epoch(
 
         if not args.distributed:
             losses_m.update(loss.item() * args.accumulation_steps, input.size(0))
-            unc_metric_m.update(unc.mean().item())
 
         do_optim_step = (batch_idx + 1) % args.accumulation_steps == 0 # Do not include an "or last_batch" here to avoid
                                                                        # incomplete last batch if we accumulate gradients
@@ -1187,14 +1211,9 @@ def train_one_epoch(
         if model_ema is not None:
             model_ema.update(model)
 
-        # Calculate accuracy and auroc with error
+        # Calculate accuracy
         pred_correct = utils.is_pred_correct(output.detach(), target).float().squeeze()
         accuracy_m.update(pred_correct.mean().item())
-
-        # Calculate R@1
-        recall, recall_correctness = recall_at_one(features.detach(), target)
-        recall_m.update(recall.item())
-        auroc_m.update(auroc(-unc.detach(), recall_correctness.int()).item())
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -1214,18 +1233,12 @@ def train_one_epoch(
                     'Train: {} [{:>4d}/{}]  '
                     'Loss: {loss.val:#.4g} ({loss.avg:#.3g})  '
                     'Accuracy: {acc.val:.3f} ({acc.avg:.3f})  '
-                    'Within-batch-R@1: {rec.val:.3f} ({rec.avg:.3f})  '
-                    'AUROC: {aur.val:.3f} ({aur.avg:.3f})  '
-                    'Unc {unc.val:.3f} ({unc.avg:.3f})  '
                     'LR: {lr:.3e}  '
                     'Remaining time: {mins_left:>4d}min'.format(
                         epoch,
                         batch_idx, len(loader),
                         loss=losses_m,
                         acc=accuracy_m,
-                        rec=recall_m,
-                        aur=auroc_m,
-                        unc=unc_metric_m,
                         lr=lr,
                         mins_left=round((len(loader) - batch_idx) * batch_time_m.avg / 60))
                 )

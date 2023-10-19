@@ -16,11 +16,7 @@ with plt.rc_context(bundles.neurips2023()):
                    s=size,
                    zorder=2)
 
-    legend = plt.legend(handles=legend_handles, bbox_to_anchor=(1.04, 0.5), loc="center left", borderaxespad=0)
-    plt.text(0.63, 0.457, 'small = ResNet-50', ha='left', va='top', zorder=10,
-             fontsize=plt.gca().get_legend().get_texts()[0].get_fontsize())
-    plt.text(0.63, 0.446, 'big = ViT-Medium', ha='left', va='top', zorder=10,
-             fontsize=plt.gca().get_legend().get_texts()[0].get_fontsize())
+    plt.legend(handles=legend_handles, bbox_to_anchor=(1.04, 0.5), loc="center left", borderaxespad=0)
     ax.set_xlabel("Downstream R@1")
     ax.set_ylabel("Downstream R-AUROC")
     ax.grid(zorder=-1, color="lightgrey", lw=0.5)
@@ -44,12 +40,12 @@ with plt.rc_context(bundles.neurips2023()):
                    zorder=2)
 
     plt.legend(handles=legend_handles, bbox_to_anchor=(1.04, 1), loc="upper left", borderaxespad=0)
-    plt.text(0.615, 0.496, 'small = ResNet-50', ha='left', va='top', zorder=10,
-             fontsize=plt.gca().get_legend().get_texts()[0].get_fontsize())
-    plt.text(0.615, 0.489, 'big = ViT-Medium', ha='left', va='top', zorder=10,
-             fontsize=plt.gca().get_legend().get_texts()[0].get_fontsize())
     ax.set_xlabel("Downstream R@1")
     ax.set_ylabel("Downstream R-AUROC")
+    plt.text(0.615, 0.492, "small = ResNet 50", fontsize=7, zorder=10)
+    plt.text(0.615, 0.485, "big = ViT-Medium", fontsize=7, zorder=10)
     ax.grid(zorder=-1, color="lightgrey", lw=0.5)
     plt.savefig("overview_final_hyperparameters.pdf")
+    fig.set_figheight(1.9)
+    plt.savefig("overview_final_hyperparameters_poster.png", dpi=1200)
     plt.close()

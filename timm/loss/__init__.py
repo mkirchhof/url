@@ -5,4 +5,4 @@ from .expected_likelihood import ExpectedLikelihoodKernel, NonIsotropicVMF
 from .jsd import JsdCrossEntropy
 from .MCInfoNCE import MCInfoNCE, InfoNCE
 from .HedgedInstance import HedgedInstance
-from .risk_prediction import RiskPrediction
+from .risk_prediction import LossPrediction

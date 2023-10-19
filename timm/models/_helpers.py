@@ -56,7 +56,7 @@ def load_state_dict(checkpoint_path, use_ema=True):
         raise FileNotFoundError()
 
 
-def load_checkpoint(model, checkpoint_path, use_ema=True, strict=True, remap=False):
+def load_checkpoint(model, checkpoint_path, use_ema=True, strict=False, remap=False):
     if os.path.splitext(checkpoint_path)[-1].lower() in ('.npz', '.npy'):
         # numpy checkpoint, try to load via model specific load_pretrained fn
         if hasattr(model, 'load_pretrained'):
@@ -67,7 +67,24 @@ def load_checkpoint(model, checkpoint_path, use_ema=True, strict=True, remap=Fal
     state_dict = load_state_dict(checkpoint_path, use_ema)
     if remap:
         state_dict = remap_checkpoint(model, state_dict)
-    incompatible_keys = model.load_state_dict(state_dict, strict=strict)
+    # If we use different number of classes, reset the classifier layer
+    # Because we cannot find out the number of classes of the checkpoint, just try and see if it fails
+    try:
+        incompatible_keys = model.load_state_dict(state_dict, strict=strict)
+    except RuntimeError as err:
+        if "size mismatch" in str(err):
+            _logger.info("Checkpointed classifier probably mismatches num_classes. Trying to load checkpoint except classifier.")
+            num_classes = model.num_classes
+            model.reset_classifier(num_classes=1000)
+            incompatible_keys = model.load_state_dict(state_dict, strict=strict)
+            model.reset_classifier(num_classes=num_classes)
+
+    # Warn if the checkpoint was only semi-compatible
+    if len(incompatible_keys.missing_keys) > 0:
+        _logger.warning("Checkpoint did not include these keys: " + ", ".join(incompatible_keys.missing_keys))
+    if len(incompatible_keys.unexpected_keys) > 0:
+        raise AssertionError("Checkpoint is probably wrong, because it contained the following unexpected keys" +
+                             ", ".join(incompatible_keys.unexpected_keys))
     return incompatible_keys
 
 

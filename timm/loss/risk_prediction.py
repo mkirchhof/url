@@ -2,13 +2,14 @@ import torch
 import torch.nn as nn
 
 
-class RiskPrediction(nn.Module):
-    def __init__(self, lambda_, task_loss=None, unc_loss=None, detach=True):
+class LossPrediction(nn.Module):
+    def __init__(self, lambda_, task_loss=None, unc_loss=None, detach=True, ignore_ce_loss=False):
         super().__init__()
         self.task_loss = task_loss or nn.CrossEntropyLoss(reduction="none")
         self.unc_loss = unc_loss or nn.MSELoss()
         self.lambda_ = lambda_
         self.detach = detach
+        self.ce_loss_multiplier = 1 - ignore_ce_loss
 
     def forward(
         self,
@@ -28,4 +29,4 @@ class RiskPrediction(nn.Module):
         unc_loss = self.unc_loss(unc, task_loss_target)
         task_loss = task_loss_per_sample.mean()
 
-        return task_loss + self.lambda_ * unc_loss
+        return self.ce_loss_multiplier * task_loss + self.lambda_ * unc_loss

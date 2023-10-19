@@ -31,13 +31,15 @@ class ImageDataset(data.Dataset):
             img_mode='RGB',
             transform=None,
             target_transform=None,
+            n_few_shot=None,
     ):
         if reader is None or isinstance(reader, str):
             reader = create_reader(
                 reader or '',
                 root=root,
                 split=split,
-                class_map=class_map
+                class_map=class_map,
+                n_few_shot=n_few_shot
             )
         self.reader = reader
         self.load_bytes = load_bytes
@@ -96,6 +98,7 @@ class IterableImageDataset(data.IterableDataset):
             download=False,
             transform=None,
             target_transform=None,
+            n_few_shot=None,
     ):
         assert reader is not None
         if isinstance(reader, str):
@@ -108,6 +111,7 @@ class IterableImageDataset(data.IterableDataset):
                 seed=seed,
                 repeats=repeats,
                 download=download,
+                n_few_shot=n_few_shot,
             )
         else:
             self.reader = reader

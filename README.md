@@ -16,18 +16,14 @@ _Representation learning has driven the field to develop pretrained models that 
 
 ### Conda environment
 
-Long answer: First, install Python 3.8.8 and PyTorch 1.10 with a CUDA backend that suits your GPU (in this case, CUDA 11.1)
+Long answer: First, create a conda environment with Python 3.8.8 and PyTorch 1.13 with a CUDA backend that suits your GPU (in this case, CUDA 11.1). Then install the dependencies in the order below.
 
 ```
-pip install python=3.8.8
-conda install pytorch==1.13.0 torchvision==0.14.0 torchaudio==0.13.0 pytorch-cuda=11.7 -c pytorch -c nvidia
-```
-
-Then, install the dependencies:
-
-```
-pip install matplotlib pyyaml huggingface_hub safetensors>=0.2 scipy==1.7.1 argparse==1.4.0 tueplots==0.0.5 wandb==0.13.5 torchmetrics==0.11.3 scikit-learn==0.24.1 pandas==1.2.4
-conda install -c pytorch faiss-gpu
+conda create --name url python=3.8.17
+conda activate url
+conda install pytorch==1.13.0 torchvision==0.14.0 torchaudio==0.13.0 pytorch-cuda=11.7 faiss-gpu -c pytorch -c nvidia
+pip install matplotlib pyyaml huggingface_hub safetensors>=0.2 scipy==1.7.1 argparse==1.4.0 tueplots==0.0.10 wandb==0.13.5 torchmetrics==0.11.3 scikit-learn==0.24.1 pandas==1.2.4 chardet==5.2.0
+conda install mkl=2021
 ```
 
 ### Datasets
@@ -35,8 +31,6 @@ conda install -c pytorch faiss-gpu
 Now, download all datasets. The scripts search for them by default under ```./data```. You can adjust this via the arguments ```--data-dir``` for the upstream (ImageNet) dataset, ```--data-dir-downstream``` for the zero-shot downstream and further downstream datasets, and ```--real-labels``` and ```--soft-labels``` for the auxiliary ImageNet-RealH files. If your downstream datasets are spread over multiple directories, consider providing one folder that gives symlinks to them.
 
 Upstream dataset: [ImageNet-1k](https://www.image-net.org/download.php)
-
-ImageNet-RealH files: [raters.npz](https://github.com/google-research/reassessed-imagenet/blob/master/raters.npz) and [real.json](https://github.com/google-research/reassessed-imagenet/blob/master/real.json)
 
 Downstream datasets: [CUB200-211](https://www.dropbox.com/s/tjhf7fbxw5f9u0q/cub200.tar?dl=0), [CARS196](https://www.dropbox.com/s/zi2o92hzqekbmef/cars196.tar?dl=0), [Stanford Online Products](https://www.dropbox.com/s/fu8dgxulf10hns9/online_products.tar?dl=0)
 
@@ -84,13 +78,13 @@ CIFAR10H/Treeversity#1/Turkey/Pig/Benthic
 
 Training happens in ```train.py```. This is adapted from the ```timm``` library, including all its models, to which we added various uncertainty output methods, so that all models have outputs of the form ```class_logits, uncertainties, embeddings = model(input)```. The best starting point to implement your own ideas would be to adapt the uncertainty output methods in ```./timm/models/layers/_uncertainizer.py```, implement losses in ```./timm/loss```, or enhance model architectures in ```./timm/models```.
 
-The URL benchmark is evaluated in ```validate.py```, which is called during training, but can also be used stand-alone if you prefer to train with your own code. An exemplary call would be
+The URL benchmark is evaluated in ```validate.py```, which is called during training (if you only want to validate without training, setting ```--lr-base=0``` will skip training epochs). An exemplary call would be
 
 ```
 train.py --model=resnet50 --loss=elk --inv_temp=28  --unc-module=pred-net --unc_width=1024 --ssl=False 
 --warmup-lr=0.0001 --lr-base=0.001 --sched=cosine --batch-size=128 --accumulation_steps=16 --epochs=32 
 --seed=1 --eval-metric avg_downstream_auroc_correct --log-wandb=True 
---data-dir=./data/ImageNet2012 --data-dir-downstream=./data --soft-labels=./data/raters.npz --real-labels=./data/real.json
+--data-dir=./data/ImageNet2012 --data-dir-eval=./data/ImageNet2012 --data-dir-downstream=./data
 ```
 
 The most important parameters are:
@@ -110,8 +104,10 @@ The most important parameters are:
 * ```--eval-metric``` Which metric to select the best epoch checkpoint by. We use ```avg_downstream_auroc_correct``` for the R-AUROC averaged across all downstream validation sets. These options here are the internal keys of the results dictionaries, as further detailed below. Keep in mind that the an ```eval_``` is prepended to the metric name internally, as we only allow to use metrics on the valiation splits to be used as ```eval-metric```.
 * ```--log-wandb``` We recommend to set this to ```True``` to log your results in W&B. Don't forget to login with your API key.
 * ```--data-dir``` Folder where ImageNet, or in general your upstream dataset, is stored.
+* ```--data-dir-eval``` Folder where your eval dataset is stored (if ```None```, the default is to use your upstream dataset from ```--data-dir```)
 * ```--data-dir-downstream``` Folder where **all** CUB200, CARS196, SOP, CIFAR10H, ..., are stored, or whichever downstream and further downstream datasets you use.
-* ```--soft-labels``` and ```--real-labels``` Links to your ImageNet-Real H ```raters.npz``` and ```real.json``` files.
+* ```--further-dataset-downstream``` List of further datasets you'd like to evaluate on. Turned off by default to save runtime. Interesting sets are the human-uncertainty datasets from the paper ```[soft/cifar, soft/treeversity1, soft/turkey, soft/pig, soft/benthic]``` or the VTAB benchmark for tasks beyond classification ```[vtab/caltech101, vtab/cars196, vtab/cifar10, vtab/cifar100, vtab/clevr_count_all, vtab/clevr_closest_object_distance, vtab/cub200, vtab/retinopathy, vtab/dmlab, vtab/dsprites_label_orientation, vtab/dsprites_label_x_position, vtab/dtd, vtab/eurosat, vtab/food101, vtab/inaturalist, vtab/kitti, vtab/oxford_flowers102, vtab/oxford_iiit_pet, vtab/patch_camelyon, vtab/resisc45, vtab/smallnorb_label_azimuth, vtab/smallnorb_label_elevation, vtab/sun397, vtab/svhn]```.
+* ```--n_few_shot``` If not ```None```, this tells how many examples to use per upstream class. Used for some experiments in the Appendix.
 
 ---
 
@@ -137,6 +133,8 @@ The most important parameters are:
   * ```auroc_correct``` This is the R-AUROC from the paper main text. This is the main metric we focus on.
   * ```r1``` The R@1 from the paper main text. This is the second most important metric.
   * ```top1``` and ```top5``` The top-1 and top-5 accuracy of the classifier. This only makes sense on the upstream dataset (it is output aswell for downstream datasets just for modularity reasons).
+  * ```auroc_correct_mixed``` This is the R-AUROC on a 50/50 mixture of the upstream and the respective downstream dataset. Used in the Appendix.
+  * ```auroc_ood``` This is the AUROC on whether images from the upstream eval dataset (ID) and downstream dataset (OOD) can be told apart based on the uncertainty value. Used in the Appendix.
   * ```croppedHasBiggerUnc``` How often a cropped version of an image has a higher uncertainty than the original version.
   * ```rcorr_crop_unc``` Rank correlation between how much we cropped an image and high uncertainty the model outputs. _Use with care!_ This is only implemented in reference to previous works. This metric only makes sense if all images show a single object, such that the amount of cropping has a roughly equal effect across all images. ```croppedHasBiggerUnc``` fixes this issue and should be preferred.
   * ```rcorr_entropy``` The rank correlation with the entropy of human soft label distributions. Only available for ```soft/...``` datasets.
@@ -226,16 +224,16 @@ train.py --c-mult=0.011311824684149863 --inv_temp=28.764754827923134 --loss=cros
 train.py --c-mult=0.011586882497402008 --img-size=256 --inv_temp=21.601079237861356 --loss=cross-entropy --lr-base=0.00012722151293115814 --model=vit_medium_patch16_gap_256hetxl --rank_V=1 --unc-module=hetxl-det --unc_start_value=0 
 ```
 
-### Direct Risk Prediction (Riskpred)
+### Loss Prediction (Losspred)
 
 Riskpred uses the ```--lambda-value``` hyperparameter to balance its cross entropy and uncertainty prediction loss.
 
 ```
-train.py --inv_temp=27.538650119804444 --lambda-value=0.04137484664752506 --loss=riskpred --lr-base=0.00907673293373138 --model=resnet50 --unc-module=pred-net --unc_start_value=0 
+train.py --lambda-value=0.04137484664752506 --loss=riskpred --lr-base=0.00907673293373138 --model=resnet50 --unc-module=pred-net --unc_start_value=0 
 ```
 
 ```
-train.py --img-size=256 --inv_temp=29.83516046330469 --lambda-value=0.011424752423322174 --loss=riskpred --lr-base=0.0026590263551453507 --model=vit_medium_patch16_gap_256 --unc-module=pred-net --unc_start_value=0.001 
+train.py --img-size=256 --lambda-value=0.011424752423322174 --loss=riskpred --lr-base=0.0026590263551453507 --model=vit_medium_patch16_gap_256 --unc-module=pred-net --unc_start_value=0.001 
 ```
 
 ### MCDropout
@@ -296,7 +294,7 @@ Several weights included or references here were pretrained with proprietary dat
 @article{kirchhof2023url,
   title={URL: A Representation Learning Benchmark for Transferable Uncertainty Estimates},
   author={Michael Kirchhof and Bálint Mucsányi and Seong Joon Oh and Enkelejda Kasneci},
-  journal={arXiv preprint arXiv:2307.03810},
+  journal={Proceedings of the Neural Information Processing Systems Track on Datasets and Benchmarks},
   year={2023}
 }
 ```
