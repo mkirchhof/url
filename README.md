@@ -106,7 +106,7 @@ The most important parameters are:
 * ```--data-dir``` Folder where ImageNet, or in general your upstream dataset, is stored.
 * ```--data-dir-eval``` Folder where your eval dataset is stored (if ```None```, the default is to use your upstream dataset from ```--data-dir```)
 * ```--data-dir-downstream``` Folder where **all** CUB200, CARS196, SOP, CIFAR10H, ..., are stored, or whichever downstream and further downstream datasets you use.
-* ```--further-dataset-downstream``` List of further datasets you'd like to evaluate on. Turned off by default to save runtime. Interesting sets are the human-uncertainty datasets from the paper ```[soft/cifar, soft/treeversity1, soft/turkey, soft/pig, soft/benthic]``` or the VTAB benchmark for tasks beyond classification ```[vtab/caltech101, vtab/cars196, vtab/cifar10, vtab/cifar100, vtab/clevr_count_all, vtab/clevr_closest_object_distance, vtab/cub200, vtab/retinopathy, vtab/dmlab, vtab/dsprites_label_orientation, vtab/dsprites_label_x_position, vtab/dtd, vtab/eurosat, vtab/food101, vtab/inaturalist, vtab/kitti, vtab/oxford_flowers102, vtab/oxford_iiit_pet, vtab/patch_camelyon, vtab/resisc45, vtab/smallnorb_label_azimuth, vtab/smallnorb_label_elevation, vtab/sun397, vtab/svhn]```.
+* ```--further-dataset-downstream``` List of further datasets you'd like to evaluate on. Turned off by default to save runtime. Interesting sets are the human-uncertainty datasets from the paper ```[soft/cifar, soft/treeversity1, soft/turkey, soft/pig, soft/benthic]```.
 * ```--n_few_shot``` If not ```None```, this tells how many examples to use per upstream class. Used for some experiments in the Appendix.
 
 ---
