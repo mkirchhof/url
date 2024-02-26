@@ -216,6 +216,8 @@ class ImagenetTransform(BaseTransform):
             ]
         )
 
+        # TODO: Add Imagenet normalization if use_prefetcher is false
+
 
 def dataset_with_index(DatasetClass: Type[Dataset]) -> Type[Dataset]:
     """Factory for datasets that also returns the data index.

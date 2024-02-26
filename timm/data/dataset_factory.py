@@ -3,7 +3,7 @@
 Hacked together by / Copyright 2021, Ross Wightman
 """
 import os
-
+import numpy as np
 from torchvision.datasets import CIFAR100, CIFAR10, MNIST, KMNIST, FashionMNIST, ImageFolder
 try:
     from torchvision.datasets import Places365
@@ -22,11 +22,17 @@ except ImportError:
     has_qmnist = False
 try:
     from torchvision.datasets import ImageNet
+    from .readers.reader_imagenetrealh import SoftImageNet
     has_imagenet = True
 except ImportError:
     has_imagenet = False
+try:
+    from .readers.reader_imagenet8k import ImageNet8k
+    has_imagenet8k = True
+except ImportError:
+    has_imagenet8k = False
 
-from .dataset import IterableImageDataset, ImageDataset
+from .dataset import IterableImageDataset, ImageDataset, HDF5Dataset
 
 _TORCH_BASIC_DS = dict(
     cifar10=CIFAR10,
@@ -71,6 +77,7 @@ def create_dataset(
         batch_size=None,
         seed=42,
         repeats=0,
+        model_name="",
         **kwargs
 ):
     """ Dataset factory method
@@ -142,6 +149,27 @@ def create_dataset(
             if "n_few_shot" in torch_kwargs:
                 torch_kwargs.pop("n_few_shot")
             ds = ImageNet(split=split, **torch_kwargs)
+        elif name.startswith('imagenet'):
+            assert has_imagenet, 'Please update to a newer PyTorch and torchvision for ImageNet dataset.'
+            if split in _EVAL_SYNONYM:
+                split = 'val'
+            if "n_few_shot" in torch_kwargs:
+                torch_kwargs.pop("n_few_shot")
+            ds = ImageNet(split=split, **torch_kwargs)
+            if name.endswith("_certain_50_pct") or name.endswith("_certain_80_pct") or name.endswith("_certain_90_pct")\
+                    or name.endswith("_certain_95_pct"):
+                if name.endswith("_certain_50_pct"):
+                    col = 2
+                elif name.endswith("_certain_80_pct"):
+                    col = 3
+                elif name.endswith("_certain_90_pct"):
+                    col = 4
+                elif name.endswith("_certain_95_pct"):
+                    col = 5
+                indices = np.loadtxt("data/uncertain_indices_imagenet1k_train.csv", delimiter=",", skiprows=1)[:,col]
+                ds.imgs = [x for x, include in zip(ds.imgs, indices) if include]
+                ds.samples = [x for x, include in zip(ds.samples, indices) if include]
+                ds.targets = [x for x, include in zip(ds.targets, indices) if include]
         elif name == 'image_folder' or name == 'folder':
             # in case torchvision ImageFolder is preferred over timm ImageDataset for some reason
             if search_split and os.path.isdir(root):
@@ -154,7 +182,9 @@ def create_dataset(
         # NOTE right now, HF datasets default arrow format is a random-access Dataset,
         # There will be a IterableDataset variant too, TBD
         ds = ImageDataset(root, reader=name, split=split, class_map=class_map, **kwargs)
-    elif name.startswith('tfds/'):
+    elif name.startswith('tfds/') or name.startswith('vtab/'):
+        if split in _EVAL_SYNONYM:
+            split = 'val'
         ds = IterableImageDataset(
             root,
             reader=name,
@@ -177,16 +207,34 @@ def create_dataset(
             seed=seed,
             **kwargs
         )
-    elif name.startswith('soft/') or name.startswith('repr/'):
-        ds = IterableImageDataset(
+    elif name.startswith('repr/') or name.startswith('soft/'):
+        if name.split('/', 2)[-1] == "imagenet":
+            assert has_imagenet, 'Please update to a newer PyTorch and torchvision for ImageNet dataset.'
+            assert split in _EVAL_SYNONYM, "soft/imagenet is only available for the validation dataset"
+            ds = SoftImageNet(root, path_soft_labels="/home/kirchhof/Nextcloud/Doktorarbeit/projects/large/data/raters.npz", path_real_labels="/home/kirchhof/Nextcloud/Doktorarbeit/projects/large/data/real.json", **kwargs)
+        else:
+            ds = IterableImageDataset(
+                root,
+                reader=name,
+                split=split,
+                is_training=is_training,
+                batch_size=batch_size,
+                repeats=repeats,
+                seed=seed,
+                **kwargs
+            )
+    elif name.startswith('folder/imagenet8k'):
+        assert has_imagenet8k
+        if split in _EVAL_SYNONYM:
+            split = 'val'
+        torch_kwargs = dict(root=root, **kwargs)
+        if "n_few_shot"in torch_kwargs:
+            torch_kwargs.pop("n_few_shot")
+        ds = ImageNet8k(split=split, reduce_size=name.endswith("_small"), **torch_kwargs)
+    elif name.startswith('hdf5'):
+        ds = HDF5Dataset(
             root,
-            reader=name,
-            split=split,
-            is_training=is_training,
-            batch_size=batch_size,
-            repeats=repeats,
-            seed=seed,
-            **kwargs
+            f"{name.split('/', 2)[-1]}_{split}_{model_name}"
         )
     else:
         # FIXME support more advance split cfg for ImageFolder/Tar datasets in the future

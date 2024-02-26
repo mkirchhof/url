@@ -4,17 +4,18 @@ from typing import Any, Tuple
 
 import numpy as np
 import json
+import os
 from torchvision.datasets import ImageNet
 
 
 class SoftImageNet(ImageNet):
     def __init__(self, root: str, path_soft_labels: str, path_real_labels: str, **kwargs: Any) -> None:
         super().__init__(root, split="val", **kwargs)
-        self.soft_labels, _ = load_raw_annotations(path_soft_labels, path_real_labels)
+        self.soft_labels, self.filepath_to_softid = load_raw_annotations(path_soft_labels, path_real_labels)
 
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
         img, label = super().__getitem__(index)
-        soft_label = self.soft_labels[index,:]
+        soft_label = self.soft_labels[self.filepath_to_softid[os.path.split(self.samples[index][0])[-1]],:]
         all_label = np.concatenate((np.array([label]), soft_label), 0)
         return img, all_label
 

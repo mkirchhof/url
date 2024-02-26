@@ -39,6 +39,6 @@ class HedgedInstance(nn.Module):
         neg_mask = 1 - mask
 
         # BCE loss to the positives/negatives
-        bce = (match_prob.log() * pos_mask).sum(-1) / pos_mask.sum(-1) - (match_prob.log() * neg_mask).sum(-1) / neg_mask.sum(-1)
+        bce = (match_prob.log() * pos_mask).sum(-1) / pos_mask.sum(-1) + ((1 - match_prob).log() * neg_mask).sum(-1) / neg_mask.sum(-1)
 
         return -bce.mean()

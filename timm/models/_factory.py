@@ -14,7 +14,9 @@ from ._uncertainizer import (
     UncertaintyViaConst,
     ShallowEnsembleWrapper,
     UncertaintyViaHETXLCov,
-    UncertaintyViaJSD
+    UncertaintyViaJSD,
+    UncertaintyViaVAE,
+    UncertaintyViaDeepNet
 )
 
 
@@ -44,11 +46,18 @@ def safe_model_name(model_name, remove_source=True):
     return make_safe(model_name)
 
 
-def add_unc_module(model, unc_module, unc_width):
+def add_unc_module(model, unc_module, unc_width, unc_depth=3, init_prednet_zero=False, stopgrad=False):
     if unc_module == "embed-norm":
         return UncertaintyViaNorm(model)
-    elif unc_module == "pred-net":
-        return UncertaintyViaNetwork(model, width=unc_width)
+    elif unc_module == "pred-net" or unc_module == "prednet":
+        return UncertaintyViaNetwork(model, width=unc_width, depth=unc_depth, init_prednet_zero=init_prednet_zero, stopgrad=stopgrad)
+    elif unc_module == "deep-prednet":
+        return UncertaintyViaDeepNet(model, width=unc_width, depth=unc_depth, init_prednet_zero=init_prednet_zero, stopgrad=stopgrad)
+    elif unc_module.startswith("pred-net-layer_") or unc_module.startswith("prednet-layer_"):
+        idxes = [int(unc_module.split("_")[-1])]
+        return UncertaintyViaDeepNet(model, hook_layer_idxes=idxes, width=unc_width, depth=unc_depth, init_prednet_zero=init_prednet_zero, stopgrad=stopgrad)
+    elif unc_module == "vae":
+        return UncertaintyViaVAE(model, width=unc_width, depth=unc_depth, init_prednet_zero=init_prednet_zero, stopgrad=stopgrad)
     elif unc_module == "class-entropy":
         return UncertaintyViaEntropy(model)
     elif unc_module == "jsd":
@@ -65,6 +74,7 @@ def create_model(
         model_name: str,
         unc_module:str = "none",
         unc_width:int = 512,
+        unc_depth:int = 3,
         pretrained: bool = False,
         pretrained_cfg: Optional[Union[str, Dict[str, Any], PretrainedCfg]] = None,
         pretrained_cfg_overlay:  Optional[Dict[str, Any]] = None,
@@ -73,6 +83,8 @@ def create_model(
         exportable: Optional[bool] = None,
         no_jit: Optional[bool] = None,
         num_heads: int = 1,
+        init_prednet_zero=False,
+        stopgrad=False,
         **kwargs,
 ):
     """Create a model
@@ -86,6 +98,7 @@ def create_model(
         model_name (str): name of model to instantiate
         unc_module (str): type of the uncertainty estimator
         unc_width (int): Width of the uncertainty estimation network (if used)
+        unc_depth (int): Number of hidden layers in uncertainty estimation network (if used)
         pretrained (bool): load pretrained ImageNet-1k weights if true
         pretrained_cfg (Union[str, dict, PretrainedCfg]): pass in external pretrained_cfg for model
         pretrained_cfg_overlay (dict): replace key-values in base pretrained_cfg with these
@@ -142,11 +155,11 @@ def create_model(
             pretrained_cfg_overlay=pretrained_cfg_overlay,
             **kwargs,
         )
-    
+
     if num_heads > 1:
         model = ShallowEnsembleWrapper(model, num_heads=num_heads)
 
-    model = add_unc_module(model, unc_module, unc_width)
+    model = add_unc_module(model, unc_module, unc_width, unc_depth, init_prednet_zero, stopgrad)
 
     if checkpoint_path:
         load_checkpoint(model, checkpoint_path)

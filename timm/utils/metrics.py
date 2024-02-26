@@ -67,6 +67,32 @@ def recall_at_one(features, targets, mode="matmul"):
 
     return is_same_class.mean(), is_same_class
 
+def recall_at_one_subset(features, targets, mode="matmul", idxes_database=None, idxes_query=None):
+    if idxes_database is None:
+        idxes_database = range(len(targets))
+    idx_set_database = set(idxes_database)
+    if idxes_query is None:
+        idxes_query = range(len(targets))
+    if mode=="matmul":
+        # Expects tensors as inputs
+        features = F.normalize(features, dim=-1)
+        closest_idxes = features[idxes_query].matmul(features[idxes_database].transpose(-2, -1)).topk(2)[1][:,1]
+        closest_classes = targets[idxes_database][closest_idxes]
+        is_same_class = (closest_classes == targets[idxes_query]).float()
+    elif mode=="faiss":
+        # For big data, use faiss. Expects numpy arrays with float32 as inputs
+        features = normalize(features, axis=1)
+        faiss_search_index = faiss.IndexFlatIP(features.shape[-1])
+        faiss_search_index.add(features[idxes_database])
+        _, closest_idxes = faiss_search_index.search(features[idxes_query], 2)  # use 2, because the closest one will be the point itself
+        closest_idxes = [closest_idxes[idx, 1] if idx in idx_set_database else closest_idxes[idx, 0] for idx in range(len(idxes_query))]
+        closest_classes = targets[idxes_database][closest_idxes]
+        is_same_class = (closest_classes == targets[idxes_query]).astype("float")
+    else:
+        raise NotImplementedError(f"mode {mode} not implemented.")
+
+    return is_same_class.mean(), is_same_class
+
 def pct_cropped_has_bigger_uncertainty(unc_orig, unc_cropped):
     return (unc_orig < unc_cropped).float().mean()
 

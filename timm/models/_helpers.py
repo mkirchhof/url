@@ -75,9 +75,11 @@ def load_checkpoint(model, checkpoint_path, use_ema=True, strict=False, remap=Fa
         if "size mismatch" in str(err):
             _logger.info("Checkpointed classifier probably mismatches num_classes. Trying to load checkpoint except classifier.")
             num_classes = model.num_classes
-            model.reset_classifier(num_classes=1000)
+            model.reset_classifier(num_classes=21843)
             incompatible_keys = model.load_state_dict(state_dict, strict=strict)
             model.reset_classifier(num_classes=num_classes)
+            _logger.info(f"Success! Model now has an empty classifier for {num_classes} classes.")
+
 
     # Warn if the checkpoint was only semi-compatible
     if len(incompatible_keys.missing_keys) > 0:

@@ -16,6 +16,7 @@ Hacked together by / Copyright 2020 Ross Wightman (https://github.com/rwightman)
 Modification copyright 2023 Michael Kirchhof
 """
 import argparse
+import copy
 import logging
 import os
 import time
@@ -37,7 +38,7 @@ from timm.data import create_dataset, create_loader, resolve_data_config, Mixup,
 from timm.layers import convert_splitbn_model, convert_sync_batchnorm, set_fast_norm
 from timm.loss import JsdCrossEntropy, SoftTargetCrossEntropy, BinaryCrossEntropy, LabelSmoothingCrossEntropy, \
     CrossEntropy, ExpectedLikelihoodKernel, MCInfoNCE, InfoNCE, HedgedInstance, \
-    LossPrediction, NonIsotropicVMF
+    LossPrediction, NonIsotropicVMF, LossOrderLoss
 from timm.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint, model_parameters
 from timm.optim import create_optimizer_v2, optimizer_kwargs
 from timm.scheduler import create_scheduler_v2, scheduler_kwargs
@@ -90,17 +91,17 @@ group = parser.add_argument_group('Dataset parameters')
 # Keep this argument outside the dataset group because it is positional.
 parser.add_argument('data', nargs='?', metavar='DIR', const=None,
                     help='path to dataset (positional is *deprecated*, use --data-dir)')
-parser.add_argument('--data-dir', metavar='DIR', default="./data/ImageNet2012",
+parser.add_argument('--data-dir', metavar='DIR', default="./data",
                     help='path to dataset (root dir)')
-parser.add_argument('--dataset', metavar='NAME', default='torch/imagenet',
+parser.add_argument('--dataset', metavar='NAME', default='tar/imagenet21k',
                     help='dataset type + name ("<type>/<name>") (default: ImageFolder or ImageTar if empty)')
 parser.add_argument('--data-dir-eval', metavar='DIR', default=None,
                     help='path to root dir where eval dataset is stored. If None, use --data-dir')
-parser.add_argument('--dataset_eval', metavar='NAME', default='torch/imagenet',
+parser.add_argument('--dataset_eval', metavar='NAME', default=None,
                     help='Which dataset to evaluate on (usually the same or a soft label variant of --dataset)')
-parser.add_argument('--data-dir-downstream', metavar='DIR', default="./data",
+parser.add_argument('--data-dir-downstream', metavar='DIR', default=None,
                     help='path to root dir where downstream datasets are stored. If None, use --data-dir')
-parser.add_argument('--dataset-downstream', nargs='+', default=["repr/cub", "repr/cars", "repr/sop"],
+parser.add_argument('--dataset-downstream', nargs='+', default=None,
                     type=str, help='list dataset type + name ("<type>/<name>") for the zero-shot downstream metrics. To skip downstream evaluation, just provide the same as for dataset_eval.')
 parser.add_argument('--further-dataset-downstream', nargs='+', default=[],
                     type=str, help='list dataset type + name ("<type>/<name>") to test performance on some more datasets youre interested in.')
@@ -110,9 +111,9 @@ group.add_argument('--train-split', metavar='NAME', default='train',
                    help='dataset train split (train/validation/test/trainontest/testontest). The last two are for experiments where we train on the test classes.')
 group.add_argument('--val-split', metavar='NAME', default='validation',
                    help='dataset validation split (train/validation/test/trainontest/testontest). The last two are for experiments where we train on the test classes.')
-group.add_argument('--test-split', metavar='NAME', default='test',
+group.add_argument('--test-split', metavar='NAME', default=None,
                    help='dataset test split (train/validation/test/trainontest/testontest). The last two are for experiments where we train on the test classes.')
-group.add_argument('--dataset-download', type=str2bool, default=False,
+group.add_argument('--dataset-download', type=str2bool, default=True,
                    help='Allow download of dataset for torch/ and tfds/ datasets that support it.')
 group.add_argument('--class-map', default='', type=str, metavar='FILENAME',
                    help='path to class to idx mapping file (default: "")')
@@ -121,10 +122,14 @@ group.add_argument('--n_few_shot', default=None, type=int,
 
 # Model parameters
 group = parser.add_argument_group('Model parameters')
-group.add_argument('--loss', default="cross-entropy", type=str,
-                   help="Loss function to use (cross-entropy, elk, nivmf, hib, vmf, mcinfonce, infonce, losspred)")
+group.add_argument('--loss', default="losspred-order", type=str,
+                   help="Loss function to use (cross-entropy, elk, nivmf, hib, vmf, mcinfonce, infonce, losspred, losspred-order)")
 group.add_argument('--ssl', default=False, type=str2bool, help="Whether to train using self-supervised learning.")
-group.add_argument('--model', default='resnet50', type=str, metavar='MODEL',
+group.add_argument('--unc_reg_lambda', default=0, type=float,
+                   help="Regularizer strength of the log(uncertainty) regularizer. 0 to deactivate.")
+group.add_argument('--orderloss_leeway', default=0., type=float,
+                   help="If using losspred-order, how much losses are allowed to differ to be considered equal")
+group.add_argument('--model', default='vit_base_patch16_224.augreg_in21k', type=str, metavar='MODEL',
                    help='Name of model to train (default: "resnet50")')
 group.add_argument('--num-heads', default=1, type=int,
                    help='Number of heads in a shallow ensemble (default: 1 -- no ensembling)')
@@ -146,14 +151,22 @@ group.add_argument('--mc_samples', default=16, type=int,
                    help="Number of MC samples used to calculate probabilistic losses.")
 parser.add_argument('--unc-module', metavar='NAME', default='pred-net',
                     help='What to use to estimate aleatoric uncertainty (none, class-entropy, jsd, embed-norm, pred-net, hetxl-det)')
-parser.add_argument('--unc_start_value', default=0.001, type=float,
+parser.add_argument('--unc_start_value', default=0, type=float,
                     help='Which (average) uncertainty value to start from (higher=more variance). 0 to ignore.')
-parser.add_argument('--unc_width', default=1024, type=int,
+parser.add_argument('--unc_width', default=512, type=int,
                     help='Width of the pred-net of the unc-module')
+parser.add_argument('--unc_depth', default=2, type=int,
+                    help="How many hidden layers the unc module should have")
 group.add_argument('--pretrained', type=str2bool, default=True,
                    help='Start with pretrained version of specified network (if avail)')
-group.add_argument('--freeze_backbone', type=str2bool, default=False,
-                   help='Whether to freeze the ResNet/ViT/... and only train the uncertainty module.')
+group.add_argument('--reset_classifier', type=str2bool, default=False,
+                   help='Reset the classifier of the pretrained network')
+group.add_argument('--freeze_backbone', type=str2bool, default=True,
+                   help='Whether to freeze the ResNet/ViT/... backbone.')
+group.add_argument('--freeze_classifier', type=str2bool, default=True,
+                   help='Whether to freeze the classifier.')
+group.add_argument('--freeze_prednet', type=str2bool, default=False,
+                   help='Whether to freeze the uncertainty module (if it is a pred net).')
 group.add_argument('--initial-checkpoint', default='', type=str, metavar='PATH',
                    help='Initialize model from this checkpoint (default: none)')
 group.add_argument('--resume', default='', type=str, metavar='PATH',
@@ -194,7 +207,7 @@ group.add_argument('--grad-checkpointing', type=str2bool, default=False,
 group.add_argument('--fast-norm', default=False, type=str2bool,
                    help='enable experimental fast-norm')
 group.add_argument('--model-kwargs', nargs='*', default={}, action=utils.ParseKwargs)
-group.add_argument('--inv_temp', default=28, type=float,
+group.add_argument('--inv_temp', default=1, type=float,
                    help="= 1/temperature for the loss")
 group.add_argument('--hib_add_const', default=0, type=float,
                    help="Additive constant in the HIB loss")
@@ -209,15 +222,17 @@ scripting_group.add_argument('--aot-autograd', default=False, type=str2bool,
 
 # Optimizer parameters
 group = parser.add_argument_group('Optimizer parameters')
-group.add_argument('--opt', default='lamb', type=str, metavar='OPTIMIZER',
+group.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
                    help='Optimizer (default: "sgd")')
 group.add_argument('--opt-eps', default=None, type=float, metavar='EPSILON',
                    help='Optimizer Epsilon (default: None, use opt default)')
 group.add_argument('--opt-betas', default=None, type=float, nargs='+', metavar='BETA',
                    help='Optimizer Betas (default: None, use opt default)')
+group.add_argument('--opt-beta1', default=0.8, type=float, metavar='EPSILON')
+group.add_argument('--opt-beta2', default=0.95, type=float, metavar='EPSILON')
 group.add_argument('--momentum', type=float, default=0.9, metavar='M',
                    help='Optimizer momentum (default: 0.9)')
-group.add_argument('--weight-decay', type=float, default=2e-5,
+group.add_argument('--weight-decay', type=float, default=0.0001,
                    help='weight decay (default: 2e-5)')
 group.add_argument('--clip-grad', type=float, default=None, metavar='NORM',
                    help='Clip gradient norm (default: None, no clipping)')
@@ -259,17 +274,19 @@ group.add_argument('--warmup-lr', type=float, default=1e-4, metavar='LR',
                    help='warmup learning rate (default: 1e-4)')
 group.add_argument('--min-lr', type=float, default=0, metavar='LR',
                    help='lower lr bound for cyclic schedulers that hit 0 (default: 0)')
-group.add_argument('--epochs', type=int, default=32, metavar='N',
+group.add_argument('--iters_instead_of_epochs', type=int, default=200000,
+                   help="How many examples to step over before doing one validation, scheduler step, etc. Useful for big datasets where one epoch is too long. If None or 0, use epochs as usual.")
+group.add_argument('--epochs', type=int, default=460, metavar='N',
                    help='number of epochs to train (default: 300)')
 group.add_argument('--epoch-repeats', type=float, default=0., metavar='N',
                    help='epoch repeat multiplier (number of times to repeat dataset epoch per train epoch).')
 group.add_argument('--start-epoch', default=None, type=int, metavar='N',
                    help='manual epoch number (useful on restarts)')
-group.add_argument('--decay-milestones', default=[90, 180, 270], type=int, nargs='+', metavar="MILESTONES",
+group.add_argument('--decay-milestones', default=[1/3, 2/3], type=int, nargs='+', metavar="MILESTONES",
                    help='list of decay epoch indices for multistep lr. must be increasing')
 group.add_argument('--decay-epochs', type=float, default=90, metavar='N',
                    help='epoch interval to decay LR')
-group.add_argument('--warmup-epochs', type=int, default=5, metavar='N',
+group.add_argument('--warmup-epochs', type=int, default=25, metavar='N',
                    help='epochs to warmup LR, if scheduler supports')
 group.add_argument('--warmup-prefix', type=str2bool, default=False,
                    help='Exclude warmup period from decay schedule.'),
@@ -328,8 +345,8 @@ group.add_argument('--mixup-mode', type=str, default='batch',
                    help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
 group.add_argument('--mixup-off-epoch', default=0, type=int, metavar='N',
                    help='Turn off mixup after this epoch, disabled if 0 (default: 0)')
-group.add_argument('--smoothing', type=float, default=0.1,
-                   help='Label smoothing (default: 0.1)')
+group.add_argument('--smoothing', type=float, default=0.0,
+                   help='Label smoothing (default: 0.0)')
 group.add_argument('--train-interpolation', type=str, default='random',
                    help='Training interpolation (random, bilinear, bicubic default: "random")')
 group.add_argument('--drop', type=float, default=0.0, metavar='PCT',
@@ -399,18 +416,27 @@ group.add_argument('--output', default='', type=str, metavar='PATH',
                    help='path to output folder (default: none, current dir)')
 group.add_argument('--experiment', default='', type=str, metavar='NAME',
                    help='name of train experiment, name of sub-folder for output')
-group.add_argument('--eval-metric', default='avg_downstream_auroc_correct', type=str, metavar='EVAL_METRIC',
+group.add_argument('--eval-metric', default='auroc_correct', type=str, metavar='EVAL_METRIC',
                    help='Best metric (default: "top1"')
 group.add_argument('--tta', type=int, default=0, metavar='N',
                    help='Test/inference time augmentation (oversampling) factor. 0=None (default: 0)')
 group.add_argument("--local_rank", default=0, type=int)
 group.add_argument('--use-multi-epochs-loader', type=str2bool, default=False,
                    help='use the multi-epochs-loader to save time at the beginning of every epoch')
-group.add_argument('--log-wandb', type=str2bool, default=True,
+group.add_argument('--log-wandb', type=str2bool, default=False,
                    help='log training and validation metrics to wandb')
 group.add_argument('--wandb-key', type=str, default="",
                    help="Your wandb API key")
 
+# Experimental features
+group.add_argument('--reset_optimizer', type=str2bool, default=False,
+                   help="Whether to reset the optimizer after each epoch")
+group.add_argument("--init_prednet_zero", type=str2bool, default=False,
+                   help="Whether to initialize the prediction net weights to zero (as opposed to random init)")
+group.add_argument('--stopgrad', type=str2bool, default=True,
+                   help="Whether to prevent the gradient of the prediction head to flow back into the backbone")
+group.add_argument('--blur_prob', type=float, default=0.0,
+                   help="With which probability to apply Gaussian Noise to the image")
 
 def _parse_args():
     # Do we have a config file to parse?
@@ -425,15 +451,65 @@ def _parse_args():
     args = parser.parse_args(remaining)
 
     # Include this if you are too lazy to specify number of classes in few-shot
-    # if args.n_few_shot is not None:
-    #     args.dataset_eval = args.dataset
-    #     args.dataset_downstream = [args.dataset]
-    #     args.num_classes = {"repr/cub": 100, "repr/cars": 98, "repr/sop": 11318}[args.dataset]
+    if args.dataset_eval is None:
+        args.dataset_eval = args.dataset
+    if args.dataset_downstream is None:
+        args.dataset_downstream = [args.dataset_eval]  # This will skip it
+    if args.num_classes is None or args.num_classes == 0:
+        try:
+            args.num_classes = {"repr/cub": 100,
+                                "repr/cars": 98,
+                                "repr/sop": 11318,
+                                "vtab/caltech101": 102,
+                                "vtab/cifar100": 100,
+                                "vtab/clevr_count_all": 8,
+                                "vtab/clevr_closest_object_distance": 6,
+                                "vtab/retinopathy": 5,
+                                "vtab/dmlab": 6,
+                                "vtab/dsprites_label_orientation": 16,
+                                "vtab/dsprites_label_x_position": 16,
+                                "vtab/dtd": 47,
+                                "vtab/eurosat": 10,
+                                "vtab/kitti": 4,
+                                "vtab/oxford_flowers102": 102,
+                                "vtab/oxford_iiit_pet": 37,
+                                "vtab/patch_camelyon": 2,
+                                "vtab/resisc45": 45,
+                                "vtab/smallnorb_label_azimuth": 18,
+                                "vtab/smallnorb_label_elevation": 9,
+                                "vtab/sun397": 397,
+                                "vtab/svhn": 10,
+                                "soft/cifar": 10,
+                                "soft/treeversity1": 6,
+                                "torch/imagenet": 1000,
+                                "tar/imagenet21k": 21843}[args.dataset]
+        except:
+            raise("Could not find default number of classes for your dataset. Please specify it via the --num-classes argument.")
 
-    if args.data_dir_eval is None:
+    if args.data_dir_eval is None or args.data_dir_eval == "none" or args.data_dir_eval == "None":
         args.data_dir_eval = args.data_dir
-    if args.data_dir_downstream is None:
+    if args.data_dir_downstream is None or args.data_dir_downstream == "none" or args.data_dir_downstream == "None":
         args.data_dir_downstream = args.data_dir
+    if args.dataset_eval is None or args.dataset_eval == "none" or args.dataset_eval == "None":
+        args.dataset_eval = args.dataset
+    if args.dataset_downstream is None or args.dataset_downstream == "none" or args.dataset_downstream == "None":
+        args.dataset_downstream = [args.dataset]
+
+    # wandb does not work with nargs++ so instead allow user to pass a string of multiple datasets:
+    if len(args.dataset_downstream) == 1:
+        args.dataset_downstream = args.dataset_downstream[0].split(" ")
+    if len(args.further_dataset_downstream) == 1:
+        args.dataset_downstream = args.dataset_downstream[0].split(" ")
+
+    # Detect a special code that tells us to use the local node storage.
+    # This is handled here as opposed to more cleanly in wandb,
+    # because we can only access the environment variables here
+    if args.data_dir == "\?*local_storage":
+        args.data_dir = f"/host/scratch_local/{os.environ.get('SLURM_JOB_USER')}-{os.environ.get('SLURM_JOBID')}/datasets"
+    if args.data_dir_eval == "\?*local_storage":
+        args.data_dir_eval = f"/host/scratch_local/{os.environ.get('SLURM_JOB_USER')}-{os.environ.get('SLURM_JOBID')}/datasets"
+    if args.data_dir_downstream == "\?*local_storage":
+        args.data_dir_downstream = f"/host/scratch_local/{os.environ.get('SLURM_JOB_USER')}-{os.environ.get('SLURM_JOBID')}/datasets"
 
     # Cache the args as a text string to save them in the output dir later
     args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
@@ -458,6 +534,14 @@ def main():
     #else:
     #    _logger.info(f'Training with a single process on 1 device ({args.device}).')
     assert args.rank >= 0
+
+    if utils.is_primary(args) and args.log_wandb:
+        if has_wandb:
+            os.environ["WANDB_API_KEY"] = args.wandb_key
+            wandb.init(project="large", name=args.experiment, config=args)
+        else:
+            _logger.warning(
+                "You've requested to log metrics to wandb but package not found. Metrics not being logged to wandb, try `pip install wandb`")
 
     # resolve AMP arguments based on PyTorch / Apex availability
     use_amp = None
@@ -491,6 +575,7 @@ def main():
         args.model,
         unc_module=args.unc_module,
         unc_width=args.unc_width,
+        unc_depth=args.unc_depth,
         pretrained=args.pretrained,
         in_chans=in_chans,
         num_classes=args.num_classes,
@@ -509,8 +594,13 @@ def main():
         gp_cov_discount_factor=args.gp_cov_discount_factor,
         use_spec_norm=args.use_spec_norm,
         spec_norm_bound=args.spec_norm_bound,
+        init_prednet_zero=args.init_prednet_zero,
+        stopgrad=args.stopgrad,
         **args.model_kwargs
     )
+
+    if args.reset_classifier:
+        model.reset_classifier(num_classes=model.num_classes)
 
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
@@ -537,11 +627,10 @@ def main():
         model = convert_splitbn_model(model, max(num_aug_splits, 2))
 
     # freeze model backbone
-    if args.freeze_backbone:
-        if args.unc_module == "pred-net":
-            model.freeze_backbone()
-        else:
-            _logger.warning("Freezing backbone is forbidden if --unc_module != pred-net. Continuing without frozen backbone.")
+    if args.freeze_backbone or args.freeze_classifier or args.freeze_prednet:
+        if args.unc_module != "pred-net" and args.freeze_prednet:
+            _logger.warning("Freezing uncertainty module is impossible if --unc_module != pred-net.")
+        model.set_grads(backbone=not args.freeze_backbone, classifier=not args.freeze_classifier, unc_module=not args.freeze_prednet)
 
     # move model to GPU, enable channels last layout if set
     model.to(device=device)
@@ -588,6 +677,8 @@ def main():
             _logger.info(
                 f'Learning rate ({args.lr}) calculated from base learning rate ({args.lr_base}) and global batch size ({global_batch_size}) with {args.lr_base_scale} scaling.')
 
+    if args.opt_betas is None and args.opt != "sgd":
+        args.opt_betas = [args.opt_beta1, args.opt_beta2]
     optimizer = create_optimizer_v2(
         model,
         **optimizer_kwargs(cfg=args),
@@ -660,6 +751,7 @@ def main():
         seed=args.seed,
         repeats=args.epoch_repeats,
         n_few_shot=args.n_few_shot,
+        model_name=args.model,
     )
 
     # Create the validation datasets
@@ -667,6 +759,7 @@ def main():
     if args.distributed and ('tfds' in args.dataset or 'wds' in args.dataset):
         # FIXME reduces validation padding issues when using TFDS, WDS w/ workers and distributed training
         eval_workers = min(2, args.workers)
+    eval_workers = 1  # TODO: temporary workaround
 
     dataset_locations = {}
     dataset_locations[args.dataset_eval] = (args.data_dir_eval, eval_workers)
@@ -684,7 +777,8 @@ def main():
                 download=args.dataset_download,
                 class_map=args.class_map,
                 batch_size=args.batch_size,
-                is_training=False
+                is_training=False,
+                model_name=args.model,
             )
             datasets_eval[name] = (dataset, num_workers)
 
@@ -705,7 +799,8 @@ def main():
                 download=args.dataset_download,
                 class_map=args.class_map,
                 batch_size=args.batch_size,
-                is_training=False
+                is_training=False,
+                model_name=args.model,
             )
             datasets_test[name] = (dataset, num_workers)
 
@@ -723,7 +818,8 @@ def main():
                 download=args.dataset_download,
                 class_map=args.class_map,
                 batch_size=args.batch_size,
-                is_training=False
+                is_training=False,
+                model_name=args.model,
             )
             datasets_test2[name] = (dataset, num_workers)
 
@@ -760,9 +856,7 @@ def main():
     if args.ssl:
         transform = prepare_n_crop_transform([ImagenetTransform(
             interpolation=train_interpolation, crop_size=data_config['input_size'][1])],
-            num_crops_per_aug=[2])  # This might need to be 1 or 1 1 to get positive pairs
-        # Note: I'm also hoping that solo learn doesn't need the dataset_with_index.
-        # Otherwise, we'll need to adapt the create_loader function accordingly. See prepare_datasets() in solo learn
+            num_crops_per_aug=[2])
     loader_train = create_loader(
         dataset_train,
         transform=transform,
@@ -775,6 +869,7 @@ def main():
         re_mode=args.remode,
         re_count=args.recount,
         re_split=args.resplit,
+        blur_prob=args.blur_prob,
         scale=args.scale,
         ratio=args.ratio,
         hflip=args.hflip,
@@ -786,7 +881,7 @@ def main():
         interpolation=train_interpolation,
         mean=data_config['mean'],
         std=data_config['std'],
-        num_workers=args.workers if not args.n_few_shot else 1,
+        num_workers=args.workers,
         distributed=args.distributed,
         collate_fn=collate_fn,
         pin_memory=args.pin_mem,
@@ -812,7 +907,8 @@ def main():
             pin_memory=args.pin_mem,
             device=device
         )
-    loader_eval_upstream = dataloaders_eval.pop(args.dataset_eval)
+    if args.dataset_eval in dataloaders_eval:
+        loader_eval_upstream = dataloaders_eval.pop(args.dataset_eval)
     loaders_eval_downstream = dataloaders_eval
 
     dataloaders_test = {}
@@ -893,7 +989,13 @@ def main():
         train_loss_fn = HedgedInstance(kappa_init=args.inv_temp, b=args.hib_add_const, n_samples=args.mc_samples)
         validate_loss_fn = CrossEntropy()
     elif args.loss == "losspred":
-        train_loss_fn = LossPrediction(lambda_=args.lambda_value, ignore_ce_loss=args.freeze_backbone)
+        train_loss_fn = LossPrediction(lambda_=args.lambda_value, inv_temp=args.inv_temp, ignore_ce_loss=args.freeze_classifier)
+        validate_loss_fn = CrossEntropy()
+    elif args.loss == "losspred-order":
+        train_loss_fn = LossPrediction(lambda_=args.lambda_value,
+                                       inv_temp=args.inv_temp,
+                                       unc_loss=LossOrderLoss(leeway_rho=args.orderloss_leeway),
+                                       ignore_ce_loss=args.freeze_classifier)
         validate_loss_fn = CrossEntropy()
     else:
         raise NotImplementedError(f"--loss {args.loss} is not implemented.")
@@ -903,10 +1005,13 @@ def main():
     # setup checkpoint saver and eval metric tracking
     eval_metric = args.eval_metric
     best_metric = None
+    best_eval_metric = 0
     best_test_metrics = None
     best_test_metrics2 = None
     best_eval_metrics = None
     best_epoch = None
+    test_metrics = None
+    test_metrics2 = None
     saver = None
     output_dir = None
     if utils.is_primary(args):
@@ -933,19 +1038,12 @@ def main():
         )
         with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
             f.write(args_text)
-    best_eval_metric = 0
-    best_test_metrics = None
-
-    if utils.is_primary(args) and args.log_wandb:
-        if has_wandb:
-            os.environ["WANDB_API_KEY"] = args.wandb_key
-            wandb.init(project="large", name=args.experiment, config=args)
-        else:
-            _logger.warning(
-                "You've requested to log metrics to wandb but package not found. Metrics not being logged to wandb, try `pip install wandb`")
 
     # setup learning rate schedule and starting epoch
-    updates_per_epoch = len(loader_train)
+    if args.decay_milestones is not None and all([0 <= x <= 1 for x in args.decay_milestones]):
+        # decay milestones are given in percent, transform them
+        args.decay_milestones = [round(x * args.epochs) for x in args.decay_milestones]
+    updates_per_epoch = (len(loader_train) + args.accumulation_steps - 1) // args.accumulation_steps
     lr_scheduler, num_epochs = create_scheduler_v2(
         optimizer,
         **scheduler_kwargs(args),
@@ -964,11 +1062,26 @@ def main():
             lr_scheduler.step(start_epoch)
 
     if utils.is_primary(args):
-        _logger.info(
-            f'Scheduled epochs: {num_epochs}. LR stepped per {"epoch" if lr_scheduler.t_in_epochs else "update"}.')
+        if args.iters_instead_of_epochs is not None and args.iters_instead_of_epochs > 0:
+            _logger.info(f'Scheduled iterations: {num_epochs} * {args.iters_instead_of_epochs}.')
+        else:
+            _logger.info(f'Scheduled epochs: {num_epochs}.')
+        _logger.info(f'LR stepped per {"epoch" if lr_scheduler.t_in_epochs else "update"}.')
+
+    # Set up how many dataloader iterations to train on
+    if args.iters_instead_of_epochs is None or args.iters_instead_of_epochs == 0:
+        batches_per_epoch = len(loader_train)  # Train for the full epoch
+    else:
+        batches_per_epoch = max(args.iters_instead_of_epochs // args.batch_size, 1)
+    current_train_iter = iter(loader_train)
 
     time_start_epoch = datetime.now()
     _logger.info(f"Setup took {(time_start_epoch - time_start_setup).total_seconds()} seconds")
+
+    # Save initial state of optimizer in case we want to reset it
+    if args.reset_optimizer:
+        init_optimizer_state = optimizer.state_dict()
+
     try:
         for epoch in range(start_epoch, num_epochs):
             if hasattr(dataset_train, 'set_epoch'):
@@ -976,11 +1089,16 @@ def main():
             elif args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
                 loader_train.sampler.set_epoch(epoch)
 
+            if args.reset_optimizer:
+                optimizer.load_state_dict(copy.deepcopy(init_optimizer_state))
+
             if args.lr > 0:
-                train_metrics = train_one_epoch(
+                train_metrics, current_train_iter = train_one_epoch(
                     epoch,
                     model,
                     loader_train,
+                    current_train_iter,
+                    batches_per_epoch,
                     optimizer,
                     train_loss_fn,
                     args,
@@ -992,6 +1110,7 @@ def main():
                     model_ema=model_ema,
                     mixup_fn=mixup_fn
                 )
+                _logger.info(f"Training took {(datetime.now() - time_start_epoch).total_seconds()} seconds")
             else:
                 _logger.info("Learning rate is 0, skipping training epoch.")
                 train_metrics = None
@@ -1027,9 +1146,32 @@ def main():
                     log_suffix="Val"
                 ))
 
-                _logger.info(
-                    'Downstream * R@1 {:.3f} AUROC-correctness {:.3f} croppedHasBiggerUnc {:.3f}'.format(
-                        eval_metrics["avg_downstream_r1"], eval_metrics["avg_downstream_auroc_correct"], eval_metrics["avg_downstream_croppedHasBiggerUnc"]))
+                logger_r1 = f"{eval_metrics['avg_downstream_r1']:.3f}" if "avg_downstream_r1" in eval_metrics else "not tracked"
+                logger_auroc = f"{eval_metrics['avg_downstream_auroc_correct']:.3f}" if "avg_downstream_auroc_correct" in eval_metrics else "not tracked"
+                logger_cropped = f"{eval_metrics['croppedHasBiggerUnc']:.3f}" if "croppedHasBiggerUnc" in eval_metrics else "not tracked"
+                _logger.info(f'Downstream * R@1 {logger_r1} AUROC-correctness {logger_auroc} croppedHasBiggerUnc {logger_cropped}')
+
+            if len(loaders_test) > 0:
+                test_metrics = validate_on_downstream_datasets(
+                    model,
+                    loaders_test,
+                    validate_loss_fn,
+                    args,
+                    amp_autocast=amp_autocast,
+                    tempfolder=output_dir,
+                    log_suffix="Test"
+                )
+
+            if len(loaders_test2) > 0:
+                test_metrics2 = validate_on_downstream_datasets(
+                    model,
+                    loaders_test2,
+                    validate_loss_fn,
+                    args,
+                    amp_autocast=amp_autocast,
+                    tempfolder=output_dir,
+                    log_suffix="Further test"
+                )
 
             is_new_best = (epoch == start_epoch or
                         (decreasing and eval_metrics[eval_metric] < best_eval_metric) or
@@ -1037,29 +1179,8 @@ def main():
             if is_new_best:
                 best_eval_metric = eval_metrics[eval_metric]
                 best_eval_metrics = eval_metrics
-
-                # Only for best models, track the test scores
-                if len(loaders_test) > 0:
-                    best_test_metrics = validate_on_downstream_datasets(
-                        model,
-                        loaders_test,
-                        validate_loss_fn,
-                        args,
-                        amp_autocast=amp_autocast,
-                        tempfolder=output_dir,
-                        log_suffix="Test"
-                    )
-
-                if len(loaders_test2) > 0:
-                    best_test_metrics2 = validate_on_downstream_datasets(
-                        model,
-                        loaders_test2,
-                        validate_loss_fn,
-                        args,
-                        amp_autocast=amp_autocast,
-                        tempfolder=output_dir,
-                        log_suffix="Further test"
-                    )
+                best_test_metrics = test_metrics
+                best_test_metrics2 = test_metrics2
 
             if model_ema is not None and not args.model_ema_force_cpu:
                 if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
@@ -1096,6 +1217,8 @@ def main():
                     epoch,
                     train_metrics,
                     eval_metrics,
+                    test_metrics=test_metrics,
+                    test_metrics2=test_metrics2,
                     best_eval_metrics=best_eval_metrics,
                     best_test_metrics=best_test_metrics,
                     best_test_metrics2=best_test_metrics2,
@@ -1129,6 +1252,8 @@ def train_one_epoch(
         epoch,
         model,
         loader,
+        current_train_iter,
+        batches_per_epoch,
         optimizer,
         loss_fn,
         args,
@@ -1149,17 +1274,25 @@ def train_one_epoch(
 
     second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
     batch_time_m = utils.AverageMeter()
+    #data_time_m = utils.AverageMeter()
     losses_m = utils.AverageMeter()
+    #grad_norm_m = utils.AverageMeter()
     accuracy_m = utils.AverageMeter()
 
     model.train()
     optimizer.zero_grad()
 
     end = time.time()
-    num_batches_per_epoch = len(loader)
-    last_idx = num_batches_per_epoch - 1
-    num_updates = epoch * num_batches_per_epoch
-    for batch_idx, (input, target) in enumerate(loader):
+    last_idx = batches_per_epoch - 1
+    num_updates = epoch * batches_per_epoch
+    for batch_idx in range(batches_per_epoch):
+        try:
+            (input, target) = next(current_train_iter)
+        except StopIteration:
+            # We've passed through the iterator. Get a new one
+            current_train_iter = iter(loader)
+            (input, target) = next(current_train_iter)
+
         last_batch = batch_idx == last_idx
 
         # If we get soft labels, sample a hard label from them
@@ -1177,6 +1310,9 @@ def train_one_epoch(
         with amp_autocast():
             output, unc, features = model(input)
             loss = loss_fn(output, unc, target, features, model.get_classifier()) / args.accumulation_steps
+
+        if args.unc_reg_lambda > 0:
+            loss -= args.unc_reg_lambda * unc.mean().log() / args.accumulation_steps
 
         if not args.distributed:
             losses_m.update(loss.item() * args.accumulation_steps, input.size(0))
@@ -1236,11 +1372,11 @@ def train_one_epoch(
                     'LR: {lr:.3e}  '
                     'Remaining time: {mins_left:>4d}min'.format(
                         epoch,
-                        batch_idx, len(loader),
+                        batch_idx, batches_per_epoch,
                         loss=losses_m,
                         acc=accuracy_m,
                         lr=lr,
-                        mins_left=round((len(loader) - batch_idx) * batch_time_m.avg / 60))
+                        mins_left=round((batches_per_epoch - batch_idx) * batch_time_m.avg / 60))
                 )
 
                 if args.save_images and output_dir:
@@ -1264,7 +1400,7 @@ def train_one_epoch(
     if hasattr(optimizer, 'sync_lookahead'):
         optimizer.sync_lookahead()
 
-    return OrderedDict([('loss', losses_m.avg)])
+    return OrderedDict([('loss', losses_m.avg)]), current_train_iter
 
 
 if __name__ == '__main__':

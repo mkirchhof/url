@@ -15,6 +15,7 @@ from typing import Callable
 import torch
 import torch.utils.data
 import numpy as np
+from torchvision.transforms import ToPILImage
 
 from .constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from .dataset import IterableImageDataset
@@ -22,6 +23,7 @@ from .distributed_sampler import OrderedDistributedSampler, RepeatAugSampler
 from .random_erasing import RandomErasing
 from .mixup import FastCollateMixup
 from .transforms_factory import create_transform
+from .dataset import HDF5Dataset, EmbeddingTensor
 
 _logger = logging.getLogger(__name__)
 
@@ -49,6 +51,13 @@ def fast_collate(batch):
         tensor = torch.zeros((batch_size, *batch[0][0].shape), dtype=torch.uint8)
         for i in range(batch_size):
             tensor[i] += torch.from_numpy(batch[i][0])
+        return tensor, targets
+    elif isinstance(batch[0][0], EmbeddingTensor):
+        targets = torch.from_numpy(np.array([b[1] for b in batch]))
+        assert len(targets) == batch_size
+        tensor = torch.zeros((batch_size, *batch[0][0].shape), dtype=torch.float32).as_subclass(EmbeddingTensor)
+        for i in range(batch_size):
+            tensor[i].copy_(batch[i][0])
         return tensor, targets
     elif isinstance(batch[0][0], torch.Tensor):
         targets = torch.from_numpy(np.array([b[1] for b in batch]))
@@ -85,6 +94,20 @@ def adapt_to_chs(x, n):
         assert len(x) == n, 'normalization stats must match image channels'
     return x
 
+def gauss_noise_tensor(img):
+    assert isinstance(img, torch.Tensor)
+    dtype = img.dtype
+    if not img.is_floating_point():
+        img = img.to(torch.float32)
+
+    sigma = 0.15
+
+    out = img + sigma * torch.randn_like(img)
+
+    if out.dtype != dtype:
+        out = out.to(dtype)
+
+    return out
 
 class PrefetchLoader:
 
@@ -100,11 +123,13 @@ class PrefetchLoader:
             re_prob=0.,
             re_mode='const',
             re_count=1,
-            re_num_splits=0):
+            re_num_splits=0,
+            normalization_shape=None):
 
         mean = adapt_to_chs(mean, channels)
         std = adapt_to_chs(std, channels)
-        normalization_shape = (1, channels, 1, 1)
+        if normalization_shape is None:
+            normalization_shape = (1, channels, 1, 1)
 
         self.loader = loader
         self.device = device
@@ -143,6 +168,7 @@ class PrefetchLoader:
                 next_input = next_input.to(device=self.device, non_blocking=True)
                 next_target = next_target.to(device=self.device, non_blocking=True)
                 next_input = next_input.to(self.img_dtype).sub_(self.mean).div_(self.std)
+                #next_input = gauss_noise_tensor(next_input)
                 if self.random_erasing is not None:
                     next_input = self.random_erasing(next_input)
 
@@ -211,6 +237,7 @@ def create_loader(
         re_mode='const',
         re_count=1,
         re_split=False,
+        blur_prob=0.,
         scale=None,
         ratio=None,
         hflip=0.5,
@@ -240,29 +267,38 @@ def create_loader(
     if re_split:
         # apply RE to second half of batch if no aug split otherwise line up with aug split
         re_num_splits = num_aug_splits or 2
-    dataset.transform = transform if transform is not None else create_transform(
-        input_size,
-        is_training=is_training,
-        use_prefetcher=use_prefetcher,
-        no_aug=no_aug,
-        scale=scale,
-        ratio=ratio,
-        hflip=hflip,
-        vflip=vflip,
-        color_jitter=color_jitter,
-        auto_augment=auto_augment,
-        interpolation=interpolation,
-        mean=mean,
-        std=std,
-        crop_pct=crop_pct,
-        crop_mode=crop_mode,
-        tf_preprocessing=tf_preprocessing,
-        re_prob=re_prob,
-        re_mode=re_mode,
-        re_count=re_count,
-        re_num_splits=re_num_splits,
-        separate=num_aug_splits > 0,
-    )
+
+    normalization_shape = None
+    if isinstance(dataset, HDF5Dataset):
+        input_size = (1, dataset.get_embed_dim())
+        mean = 0.
+        std = 1/255
+        normalization_shape = (1)
+    else:
+        dataset.transform = transform if transform is not None else create_transform(
+            input_size,
+            is_training=is_training,
+            use_prefetcher=use_prefetcher,
+            no_aug=no_aug,
+            scale=scale,
+            ratio=ratio,
+            hflip=hflip,
+            vflip=vflip,
+            color_jitter=color_jitter,
+            auto_augment=auto_augment,
+            interpolation=interpolation,
+            mean=mean,
+            std=std,
+            crop_pct=crop_pct,
+            crop_mode=crop_mode,
+            tf_preprocessing=tf_preprocessing,
+            re_prob=re_prob,
+            re_mode=re_mode,
+            re_count=re_count,
+            re_num_splits=re_num_splits,
+            blur_prob=blur_prob,
+            separate=num_aug_splits > 0,
+        )
 
     if isinstance(dataset, IterableImageDataset):
         # give Iterable datasets early knowledge of num_workers so that sample estimates
@@ -319,7 +355,8 @@ def create_loader(
             re_prob=prefetch_re_prob,
             re_mode=re_mode,
             re_count=re_count,
-            re_num_splits=re_num_splits
+            re_num_splits=re_num_splits,
+            normalization_shape=normalization_shape
         )
 
     return loader
@@ -355,3 +392,32 @@ class _RepeatSampler(object):
     def __iter__(self):
         while True:
             yield from iter(self.sampler)
+
+
+class ModuleWrapper(torch.nn.Module):
+    def __init__(self, obj):
+        super().__init__()
+        self.obj = obj
+
+    def __call__(self, *args, **kwargs):
+        return self.obj(*args, **kwargs)
+
+
+class PILWrapper(torch.nn.Module):
+    def __init__(self, trans):
+        super().__init__()
+        self.trans = trans
+        self.to_pil = ToPILImage()
+
+    def __call__(self, imgs):
+        res = [self.trans(self.to_pil(imgs[i])) for i in range(imgs.shape[0])]
+        res2 = torch.stack([torch.from_numpy(res[batch_idx][crop_idx]) for crop_idx in range(2) for batch_idx in range(len(res))])
+        return res2
+
+class SSLLabelTransfo(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def __call__(self, labels):
+        return labels.squeeze().repeat_interleave(2)
+

@@ -15,6 +15,7 @@ import pickle
 import tarfile
 from glob import glob
 from typing import List, Tuple, Dict, Set, Optional, Union
+from tqdm import tqdm
 
 import numpy as np
 
@@ -96,7 +97,7 @@ def extract_tarinfos(
             info = pickle.load(pf)
         assert len(info['tartrees']) == num_tars, "Cached tartree len doesn't match number of tarfiles"
     else:
-        for i, fn in enumerate(tar_filenames):
+        for i, fn in tqdm(enumerate(tar_filenames), total=num_tars):
             path = '' if root_is_tar else os.path.splitext(os.path.basename(fn))[0]
             with tarfile.open(fn, mode='r|') as tf:  # tarinfo scans done in streaming mode
                 parent_info = dict(name=os.path.relpath(fn, root), path=path, ti=None, children=[], samples=[])

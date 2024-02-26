@@ -1,12 +1,12 @@
-# URL: A Representation Learning Benchmark for <br> Transferable Uncertainty Estimates
+# Pretrained Representation Uncertainties
 
-Michael Kirchhof, Bálint Mucsányi, Seong Joon Oh, Enkelejda Kasneci
+![Pretrained uncertainty-aware image representations from a ViT-Base model](plots/tSNE.png)
 
-![URL Benchmark](plots/benchmark.png)
+This repo contains the code of two papers: _URL: A Representation Learning Benchmark for Transferable Uncertainty Estimates_, and more recently _Pretrained Visual Uncertainties_. They bring the advantages of pretrained representations to the area of uncertainty quantification: The goal is to develop models that output pretrained zero-shot uncertainties along with every pretrained representation. This representation uncertainty gives the risk that the representation is off because, e.g., not enough image features could be detected. The general output of an uncertainty-aware pretrained representation model is
 
-_Representation learning has driven the field to develop pretrained models that generalize and transfer to new datasets. With the rising demand of reliable machine learning and uncertainty quantification, we seek pretrained models that output both an embedding and an uncertainty estimate, even on unseen datasets. To guide the development of such models, we propose the uncertainty-aware representation learning (URL) benchmark. It measures whether the uncertainty predicted by a model reliably reveals the uncertainty of its embedding. URL takes only four lines of code to implement but still has an information-theoretical backbone and correlates with human-perceived uncertainties. We apply URL to study ten large-scale uncertainty quantifiers that were pretrained on ImageNet and transfered to eight downstream datasets. We find that transferable uncertainty quantification is an unsolved open problem, but that it appears to be not at stakes with classical representation learning._
+`representation, uncertainty = pretrained_model(input)`
 
-**Link**: [arxiv.org/abs/2307.03810](https://www.arxiv.org/abs/2307.03810)
+The two papers share this repo because they are based on the same backbone, with Pretrained Visual Uncertainties making huge quality-of-life improvements. This includes a 180x speedup via caching, see below. For reproducibility, the original submission code of the URL benchmark can be found in the `url_at_time_of_submission` branch.
 
 ---
 
@@ -21,31 +21,32 @@ Long answer: First, create a conda environment with Python 3.8.8 and PyTorch 1.1
 ```
 conda create --name url python=3.8.17
 conda activate url
+pip install tensorflow tensorflow-datasets tensorflow-addons opencv-python-headless
 conda install pytorch==1.13.0 torchvision==0.14.0 torchaudio==0.13.0 pytorch-cuda=11.7 faiss-gpu -c pytorch -c nvidia
-pip install matplotlib pyyaml huggingface_hub safetensors>=0.2 scipy==1.7.1 argparse==1.4.0 tueplots==0.0.10 wandb==0.13.5 torchmetrics==0.11.3 scikit-learn==0.24.1 pandas==1.2.4 chardet==5.2.0
+pip install matplotlib pyyaml huggingface_hub safetensors>=0.2 scipy argparse==1.4.0 tueplots==0.0.10 wandb==0.13.5 torchmetrics==0.11.3 scikit-learn==0.24.1 pandas==1.2.4 chardet==5.2.0
 conda install mkl=2021
 ```
 
 ### Datasets
 
-Now, download all datasets. The scripts search for them by default under ```./data```. You can adjust this via the arguments ```--data-dir``` for the upstream (ImageNet) dataset, ```--data-dir-downstream``` for the zero-shot downstream and further downstream datasets, and ```--real-labels``` and ```--soft-labels``` for the auxiliary ImageNet-RealH files. If your downstream datasets are spread over multiple directories, consider providing one folder that gives symlinks to them.
+Now, download all datasets you want to train or zero-shot test on. The scripts search for them by default under ```./data```. You can adjust this via the arguments ```--data-dir``` for the upstream (ImageNet-21k) dataset and ```--data-dir-downstream``` for the zero-shot downstream datasets. If your downstream datasets are spread over multiple directories, consider providing one folder that gives symlinks to them.
 
-Upstream dataset: [ImageNet-1k](https://www.image-net.org/download.php)
+Upstream datasets: [ImageNet-1k](https://www.image-net.org/download.php) or ImageNet-21k. For ImageNet-21k, download the Winter-2021 version of imagenet.
 
-Downstream datasets: [CUB200-211](https://www.dropbox.com/s/tjhf7fbxw5f9u0q/cub200.tar?dl=0), [CARS196](https://www.dropbox.com/s/zi2o92hzqekbmef/cars196.tar?dl=0), [Stanford Online Products](https://www.dropbox.com/s/fu8dgxulf10hns9/online_products.tar?dl=0)
+Downstream datasets for URL benchmark: [CUB200-211](https://www.dropbox.com/s/tjhf7fbxw5f9u0q/cub200.tar?dl=0), [CARS196](https://www.dropbox.com/s/zi2o92hzqekbmef/cars196.tar?dl=0), [Stanford Online Products](https://www.dropbox.com/s/fu8dgxulf10hns9/online_products.tar?dl=0)
 
-Further downstream datasets: [CIFAR-10H, Treeversity#1, Turkey, Pig, Benthic](https://doi.org/10.5281/zenodo.7152309)
+Further downstream datasets: [CIFAR-10H, Treeversity#1](https://doi.org/10.5281/zenodo.7152309) and datasets from VTAB. VTAB datasets are automatically downloaded from tensorflow datasets upon first use. For some datasets, tensorflow might throw instructions on how to manually download them.
 
 Please verify that your folder structure for the downstream datasets looks like this (note the folder names for each dataset):
 
 ```
-cub200
+cub
 └───images
 |    └───BMW 3 Series Wagon 2012
 |           │   00039.jpg
 |           │   ...
 |    ...
-cars196
+cars
 └───images
 |    └───001.Black_footed_Albatross
 |           │   Black_Footed_Albatross_0001_796111.jpg
@@ -65,7 +66,7 @@ online_products
 The further downstream datasets should look like this directly after unzipping
 
 ```
-CIFAR10H/Treeversity#1/Turkey/Pig/Benthic
+CIFAR10H/Treeversity#1
 └───fold1
 |    │   182586_00.png
 |    ...
@@ -78,36 +79,37 @@ CIFAR10H/Treeversity#1/Turkey/Pig/Benthic
 
 Training happens in ```train.py```. This is adapted from the ```timm``` library, including all its models, to which we added various uncertainty output methods, so that all models have outputs of the form ```class_logits, uncertainties, embeddings = model(input)```. The best starting point to implement your own ideas would be to adapt the uncertainty output methods in ```./timm/models/layers/_uncertainizer.py```, implement losses in ```./timm/loss```, or enhance model architectures in ```./timm/models```.
 
-The URL benchmark is evaluated in ```validate.py```, which is called during training (if you only want to validate without training, setting ```--lr-base=0``` will skip training epochs). An exemplary call would be
+An exemplary call to train a ViT-Base on ImageNet-21k and evaluate its uncertainties on the zero-shot datasets CUB, CARS, and SOP would be
 
 ```
-train.py --model=resnet50 --loss=elk --inv_temp=28  --unc-module=pred-net --unc_width=1024 --ssl=False 
---warmup-lr=0.0001 --lr-base=0.001 --sched=cosine --batch-size=128 --accumulation_steps=16 --epochs=32 
---seed=1 --eval-metric avg_downstream_auroc_correct --log-wandb=True 
---data-dir=./data/ImageNet2012 --data-dir-eval=./data/ImageNet2012 --data-dir-downstream=./data
+train.py --model=vit_base_patch16_224.augreg_in21k --dataset-downstream=[repr/cub, repr/cars, repr/sop] --initial-checkpoint vit_base_checkpoint.pth.tar
 ```
+
+If you only want to zero-shot validate without training, setting ```--lr-base=0``` will skip training epochs. If you want to also check the test splits, add ```--test_split=test```.
 
 The most important parameters are:
-* ```--model``` Which backbone to use. In our paper, we use ```resnet50``` and ```vit_medium_patch16_gap_256```.
-* ```--loss``` Which loss to use. Note that some approaches, like MCDropout, use a ```cross-entropy``` loss, but specify other parameters to make them into their own loss. Please refer to the example codes below.
+* ```--model``` Which backbone to use. ```vit_base_patch16_224.augreg_in21k``` is for ImageNet-21k. Popular choices for ImageNet-1k would be ```resnet50``` or ```vit_medium_patch16_gap_256```.
+* ```--dataset-downstream``` List of zero-shot datasets you'd like to evaluate on. Turned off by default to save runtime when only training. In the paper we use: ```[repr/cub, repr/cars, repr/sop, soft/cifar, soft/treeversity1, vtab/caltech101, vtab/cifar100, vtab/dtd, vtab/oxford_flowers102, vtab/oxford_iiit_pet, vtab/resisc45, vtab/sun397, vtab/svhn]```.
+* ```--initial-checkpoint``` The script saves checkpoints every epoch. You can provide the path to start from one here. E.g., you can download the ones we pretrained in the Pretrained Visual Uncertainties paper from [Google Drive](https://drive.google.com/drive/folders/1W3u0xS_kOvirv1EgRpg-Ug4UIwnHPV6Z?usp=sharing) 
+* ```--epochs``` Number of epochs to train for on the upstream dataset. Since we automatically start from pretrained checkpoints, this is set to ```32``` by default.
+* ```--iters_instead_of_epochs``` For larger datasets, use this amount of images as _one epoch_, so that we validate more often. Default is ```200000```, so we do not use standard epochs by default.
+* ```--test_split``` By default ```None``` to skip testing on test data (only on validation data, since ```--val_split=validation``` by default). Set to ```test``` if you want to calculate results for your final paper.
+* ```--loss``` Which loss to use. We use our paper's ```losspred-order``` by default. Note that some approaches, like MCDropout, use a ```cross-entropy``` loss, but specify other parameters to make them into their own loss. Please refer to the example codes below.
 * ```--inv_temp``` The hyperparameter constant the distances in the softmax exponentials are multiplied by. This can also be understood as the inverse of the temperature. Some approaches require further hyperparameters. Please refer to the example codes below.
 * ```--unc-module``` How to calculate the uncertainty attached to each embedding. Popular choices are an explicit ```pred-net``` module attached to the model or the ```class-entropy``` of the predicted upstream class label distribution. These uncertainty modules are implemented as wrappers around the models, so that any combination of model backbone and uncertainty method should work.
-* ```--unc_width``` If ```--unc-module=pred-net```, this gives the width of the 3-layer MLP to estimate uncertainties.
+* ```--unc_width``` If ```--unc-module=pred-net```, this gives the width of the 2-layer MLP to estimate uncertainties.
 * ```--ssl``` Set to ```False``` if you want to learn with supervised labels and to ```True``` if you want to learn from self-supervised contrastive pairs. Note that these result in different data formats, such that not all losses are compatible with all settings. Please refer to the example codes below.
 * ```--warmup-lr``` The fixed learning rate to use in the first epoch. Usually lower than the learning rate in later epochs.
 * ```--lr-base``` The learning rate in reference to a batchsize of 256. This will be increased/decreased automatically if you use a smaller or bigger total batchsize. The current learning rate will be printed in the log.
 * ```--sched``` Which learning rate scheduler to use. In the paper we use ```cosine``` annealing, but you may want to try out ```step```.
 * ```--batch-size``` How many samples to process at the same time.
 * ```--accumulation_steps``` How many batches to calculate before making one optimizer step. The accumulation steps times the batch size gives the final, effective batchsize. Loss scalers adjust to this automatically.
-* ```--epochs``` Number of epochs to train for on the upstream dataset. Since we automatically start from pretrained checkpoints, this is set to ```32``` by default.
-* ```--seed``` For final results, we replicate each experiment on the seeds ```1, 2, 3``
+* ```--seed``` For final results, we replicate each experiment on the seeds ```1, 2, 3, 4, 5``
 * ```--eval-metric``` Which metric to select the best epoch checkpoint by. We use ```avg_downstream_auroc_correct``` for the R-AUROC averaged across all downstream validation sets. These options here are the internal keys of the results dictionaries, as further detailed below. Keep in mind that the an ```eval_``` is prepended to the metric name internally, as we only allow to use metrics on the valiation splits to be used as ```eval-metric```.
 * ```--log-wandb``` We recommend to set this to ```True``` to log your results in W&B. Don't forget to login with your API key.
 * ```--data-dir``` Folder where ImageNet, or in general your upstream dataset, is stored.
 * ```--data-dir-eval``` Folder where your eval dataset is stored (if ```None```, the default is to use your upstream dataset from ```--data-dir```)
 * ```--data-dir-downstream``` Folder where **all** CUB200, CARS196, SOP, CIFAR10H, ..., are stored, or whichever downstream and further downstream datasets you use.
-* ```--further-dataset-downstream``` List of further datasets you'd like to evaluate on. Turned off by default to save runtime. Interesting sets are the human-uncertainty datasets from the paper ```[soft/cifar, soft/treeversity1, soft/turkey, soft/pig, soft/benthic]```.
-* ```--n_few_shot``` If not ```None```, this tells how many examples to use per upstream class. Used for some experiments in the Appendix.
 
 ---
 
@@ -142,30 +144,44 @@ The most important parameters are:
 
 ---
 
-## Reproducing our Implemented Methods
+## Caching everything
+If you want to experiment multiple times and only train an uncertainty module for an otherwise pretrained and frozen backbone, it makes sense to cache all epochs (all images, random augmentations, targets) once and then load only the cached representations. This speeds up training by ~180x and reduces your compute's CO2 footprint accordingly. 
 
-Below are the calls to reproduce the URL benchmark results on all ten baseline approaches, both on ResNet and ViT backbones. They all use the best hyperparameters we found in our searches. All approaches in the paper were repeated on seeds 1, 2, and 3, which we do not show here for brevity.
+This caching happens in ```create_cached_dataset.py```. Its arguments are the same as for ```train.py```. It will output an HDF5 dataset of cached representations and class labels to the ```./cached_datasets``` directory. You can then load this dataset in ```train.py``` via ```--dataset=hdf5/...``` where ```...``` is the folder name your dataset is stored under. The dataloaders and models will automatically skip the backbone upon detecting HDF5 datasets.
 
-### Cross Entropy
+---
 
-```
-train.py --inv_temp=31.353232263344143 --loss=cross-entropy --lr-base=0.0027583475549166764 --model=resnet50 --unc-module=class-entropy --unc_start_value=0
-```
+## Examples
 
-```
-train.py --img-size=256 --inv_temp=60.70635770117517 --loss=cross-entropy --lr-base=0.004954014361368407 --model=vit_medium_patch16_gap_256 --unc-module=class-entropy --unc_start_value=0
-```
+Below are the calls to reproduce the URL benchmark results on all ten baseline approaches and for Pretrained Visual Uncertainties, both on ResNet and ViT backbones. They all use the best hyperparameters we found in our searches. All approaches in the paper were repeated on seeds 1, 2, and 3, which we do not show here for brevity.
 
-### InfoNCE
-
-InfoNCE requires ```--ssl=True```, and a lower batchsize, since we forward two self-supervised crops per image.
+### Pretrained Visual Uncertainties
+The ViTs-{Tiny,Small,Base,Large} from Pretrained Visual Uncertainties are trained as shown below. Their final checkpoints are available on [Google Drive](https://drive.google.com/drive/folders/1W3u0xS_kOvirv1EgRpg-Ug4UIwnHPV6Z?usp=sharing)
 
 ```
-train.py --accumulation_steps=21 --batch-size=96 --inv_temp=15.182859908025058 --loss=infonce --lr-base=0.0004452562693472003 --model=resnet50 --ssl=True --unc-module=embed-norm --unc_start_value=0
+train.py --model=vit_base_patch16_224.augreg_in21k --loss=losspred-order --dataset=folder/imagenet21k lr-base=0.001 --img-size=224
 ```
 
 ```
-train.py --accumulation_steps=21 --batch-size=96 --img-size=256 --inv_temp=20.82011649785067 --loss=infonce --lr-base=0.006246538808281836 --model=vit_medium_patch16_gap_256 --ssl=True --unc-module=embed-norm --unc_start_value=0
+train.py --model=vit_large_patch16_224.augreg_in21k --loss=losspred-order --dataset=folder/imagenet21k lr-base=0.001 --img-size=224
+```
+
+```
+train.py --model=vit_tiny_patch16_224.augreg_in21k --loss=losspred-order --dataset=folder/imagenet21k lr-base=0.001 --img-size=224
+```
+
+```
+train.py --model=vit_small_patch16_224.augreg_in21k --loss=losspred-order --dataset=folder/imagenet21k lr-base=0.001 --img-size=224
+```
+
+### Non-isotropic von Mises Fisher (nivMF)
+
+```
+train.py --loss=nivmf --model=resnet50 --inv_temp=10.896111351193488 --lr-base=0.00014942909398367403 --unc_start_value=0.001 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb  --dataset=torch/imagenet --unc_width=1024 --unc_depth=3
+```
+
+```
+train.py --loss=nivmf --model=vit_medium_patch16_gap_256 --img-size=256 --inv_temp=31.353232263344143 --lr-base=0.0027583475549166764  --unc_start_value=0.001 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet --unc_width=1024 --unc_depth=3
 ```
 
 ### MCInfoNCE
@@ -173,43 +189,21 @@ train.py --accumulation_steps=21 --batch-size=96 --img-size=256 --inv_temp=20.82
 MCInfoNCE requires ```--ssl=True```, and a lower batchsize, since we forward two self-supervised crops per image. The MC sampling MCInfoNCE adds over InfoNCE did not significantly impact runtime or memory usage.
 
 ```
-train.py --accumulation_steps=21 --batch-size=96 --inv_temp=52.43117045513681 --loss=mcinfonce --lr-base=2.384205225724591e-05 --model=resnet50 --ssl=True --unc-module=pred-net --unc_start_value=0.001 --warmup-lr=3.487706876306753e-05
+train.py --loss=mcinfonce --model=resnet50 --ssl=True --accumulation_steps=21 --batch-size=96 --inv_temp=52.43117045513681 --lr-base=2.384205225724591e-05 --unc_start_value=0.001 --warmup-lr=3.487706876306753e-05 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet --unc_width=1024 --unc_depth=3
 ```
 
 ```
-train.py --accumulation_steps=21 --batch-size=96 --img-size=256 --inv_temp=50.27568453131382 --loss=mcinfonce --lr-base=0.0031866603949435874 --model=vit_medium_patch16_gap_256 --ssl=True --unc-module=pred-net --unc_start_value=0.001
+train.py --loss=mcinfonce --model=vit_medium_patch16_gap_256 --ssl=True --accumulation_steps=21 --batch-size=96 --img-size=256 --inv_temp=50.27568453131382 --lr-base=0.0031866603949435874 --unc_start_value=0.001 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet --unc_width=1024 --unc_depth=3
 ```
 
 ### Expected Likelihood Kernel (ELK)
 
 ```
-train.py --inv_temp=27.685357549319253 --loss=elk --lr-base=0.008324452068209802 --model=resnet50 --unc-module=pred-net --unc_start_value=0
+train.py --loss=elk --model=resnet50 --inv_temp=27.685357549319253  --lr-base=0.008324452068209802 --unc-module=pred-net --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet --unc_width=1024 --unc_depth=3
 ```
 
 ```
-train.py --img-size=256 --inv_temp=56.77356863558765 --loss=elk --lr-base=0.009041687325778511 --model=vit_medium_patch16_gap_256 --unc-module=pred-net --unc_start_value=0
-```
-
-### Non-isotropic von Mises Fisher (nivMF)
-
-```
-train.py --inv_temp=10.896111351193488 --loss=nivmf --lr-base=0.00014942909398367403 --model=resnet50 --unc-module=pred-net --unc_start_value=0.001
-```
-
-```
-train.py --img-size=256 --inv_temp=31.353232263344143 --loss=nivmf --lr-base=0.0027583475549166764 --model=vit_medium_patch16_gap_256 --unc-module=pred-net --unc_start_value=0.001
-```
-
-### Hedged Instance Embeddings (HIB)
-
-HIB has an additional hyperparameter ```--hib_add_const``` to shift its sigmoid. HIB requires lower batchsizes to prevent running out of VRAM.
-
-```
-train.py --accumulation_steps=21 --batch-size=96 --hib_add_const=2.043464396656407 --inv_temp=26.850376086478832 --loss=hib --lr-base=5.606607236666466e-05 --model=resnet50 --unc-module=pred-net --unc_start_value=0 --warmup-lr=2.2864937540918197e-06
-```
-
-```
-train.py --accumulation_steps=43 --batch-size=48 --hib_add_const=-5.360730528719454 --img-size=256 --inv_temp=13.955844954616405 --loss=hib --lr-base=0.0005920448270870512 --model=vit_medium_patch16_gap_256 --unc-module=pred-net --unc_start_value=0
+train.py --loss=elk --model=vit_medium_patch16_gap_256 --img-size=256 --inv_temp=56.77356863558765 --lr-base=0.009041687325778511  --unc-module=pred-net --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet --unc_width=1024 --unc_depth=3
 ```
 
 ### Heteroscedastic Classifiers (HET-XL)
@@ -217,11 +211,11 @@ train.py --accumulation_steps=43 --batch-size=48 --hib_add_const=-5.360730528719
 HET-XL uses several hyperparameters, see the args in ```train.py```, most importantly the ```--rank_V``` of the covariance matrix and ```--c-mult```. HET-XL uses a standard cross-entropy loss, but a modified architecture, which you call via the ```--model``` argument. We've implemented this only for ResNet 50 and ViT Medium. It can also use either its covariance determinant or class entropy as ```--unc-module```. In our experiments, the latter outperformed the former.
 
 ```
-train.py --c-mult=0.011311824684149863 --inv_temp=28.764754827923134 --loss=cross-entropy --lr-base=0.00030257136041070065 --model=resnet50hetxl --rank_V=1 --unc-module=class-entropy --unc_start_value=0
+train.py --loss=cross-entropy --model=resnet50hetxl --c-mult=0.011311824684149863 --inv_temp=28.764754827923134 --lr-base=0.00030257136041070065 --rank_V=1 --unc-module=class-entropy --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
 ```
 
 ```
-train.py --c-mult=0.011586882497402008 --img-size=256 --inv_temp=21.601079237861356 --loss=cross-entropy --lr-base=0.00012722151293115814 --model=vit_medium_patch16_gap_256hetxl --rank_V=1 --unc-module=hetxl-det --unc_start_value=0 
+train.py --loss=cross-entropy --model=vit_medium_patch16_gap_256hetxl --c-mult=0.011586882497402008 --img-size=256 --inv_temp=21.601079237861356 --lr-base=0.00012722151293115814 --rank_V=1 --unc-module=hetxl-det --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
 ```
 
 ### Loss Prediction (Losspred)
@@ -229,35 +223,11 @@ train.py --c-mult=0.011586882497402008 --img-size=256 --inv_temp=21.601079237861
 Riskpred uses the ```--lambda-value``` hyperparameter to balance its cross entropy and uncertainty prediction loss.
 
 ```
-train.py --lambda-value=0.04137484664752506 --loss=riskpred --lr-base=0.00907673293373138 --model=resnet50 --unc-module=pred-net --unc_start_value=0 
+train.py --loss=riskpred --model=resnet50 --lambda-value=0.04137484664752506 --lr-base=0.00907673293373138 --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet --unc_width=1024 --unc_depth=3
 ```
 
 ```
-train.py --img-size=256 --lambda-value=0.011424752423322174 --loss=riskpred --lr-base=0.0026590263551453507 --model=vit_medium_patch16_gap_256 --unc-module=pred-net --unc_start_value=0.001 
-```
-
-### MCDropout
-
-Specify the number of MC samples to take via ```--num-heads``` and the dropout rate via ```--drop```.
-
-```
-train.py --drop=0.08702220252645132 --inv_temp=29.31590841184109 --loss=cross-entropy --lr-base=0.00016199535513680024 --model=resnet50dropout --unc-module=jsd --unc_start_value=0 
-```
-
-```
-train.py --drop=0.1334044009405148 --img-size=256 --inv_temp=57.13603169495254 --loss=cross-entropy --lr-base=0.0027583475549166764 --model=vit_medium_patch16_gap_256dropout --unc-module=class-entropy --unc_start_value=0 
-```
-
-### Ensemble
-
-Specify the number heads via ```--num-heads```. This increases memory and computation usage.
-
-```
-train.py --inv_temp=29.89825063351814 --loss=cross-entropy --lr-base=0.004405890102835956 --model=resnet50 --num-heads=10 --unc-module=class-entropy --unc_start_value=0
-```
-
-```
-train.py --img-size=256 --inv_temp=54.435826404570726 --loss=cross-entropy --lr-base=0.004944771531139904 --model=vit_medium_patch16_gap_256 --num-heads=10 --unc-module=class-entropy --unc_start_value=0 
+train.py --loss=riskpred --model=vit_medium_patch16_gap_256 --img-size=256 --lambda-value=0.011424752423322174 --lr-base=0.0026590263551453507 --unc-module=pred-net --unc_start_value=0.001 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet --unc_width=1024 --unc_depth=3
 ```
 
 ### Spectral-normalized Neural Gaussian Processes (SNGP/GP)
@@ -265,11 +235,69 @@ train.py --img-size=256 --inv_temp=54.435826404570726 --loss=cross-entropy --lr-
 SNGP has mutiple hyperparameters. Our implementation follows the defaults of the original paper. Most importantly, ```--use-spec-norm``` controls whether to use SNGP or drop the SN and only use GP. Like HET-XL, SNGP is called via a modified model architecture and otherwise uses a standard cross entropy loss.
 
 ```
-train.py --gp-cov-discount-factor=-1 --gp-input-normalization=True --loss=cross-entropy --lr-base=0.003935036929170965 --model=resnet50sngp --spec-norm-bound=3.0034958778109893 --unc-module=class-entropy --unc_start_value=0 --use-spec-norm=True
+train.py --loss=cross-entropy --model=resnet50sngp --gp-cov-discount-factor=-1 --gp-input-normalization=True --lr-base=0.003935036929170965 --spec-norm-bound=3.0034958778109893 --unc-module=class-entropy --unc_start_value=0 --use-spec-norm=True --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
 ```
 
 ```
-train.py --gp-cov-discount-factor=0.999 --gp-input-normalization=True --img-size=256 --loss=cross-entropy --lr-base=0.0002973866135608272 --model=vit_medium_patch16_gap_256sngp --spec-norm-bound=2.0072013733952883 --unc-module=class-entropy --unc_start_value=0 --use-spec-norm=False
+train.py --loss=cross-entropy --model=vit_medium_patch16_gap_256sngp --gp-cov-discount-factor=0.999 --gp-input-normalization=True --img-size=256 --lr-base=0.0002973866135608272 --spec-norm-bound=2.0072013733952883 --unc-module=class-entropy --unc_start_value=0 --use-spec-norm=False --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
+```
+
+### Hedged Instance Embeddings (HIB)
+
+HIB has an additional hyperparameter ```--hib_add_const``` to shift its sigmoid. HIB requires lower batchsizes to prevent running out of VRAM.
+
+```
+train.py --loss=hib --model=resnet50 --accumulation_steps=21 --batch-size=96 --hib_add_const=2.043464396656407 --inv_temp=26.850376086478832 --lr-base=5.606607236666466e-05 --unc_start_value=0 --warmup-lr=2.2864937540918197e-06 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet --unc_width=1024 --unc_depth=3
+```
+
+```
+train.py --loss=hib --model=vit_medium_patch16_gap_256 --accumulation_steps=43 --batch-size=48 --hib_add_const=-5.360730528719454 --img-size=256 --inv_temp=13.955844954616405 --lr-base=0.0005920448270870512 --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet --unc_width=1024 --unc_depth=3
+```
+
+### MCDropout
+
+Specify the number of MC samples to take via ```--num-heads``` and the dropout rate via ```--drop```.
+
+```
+train.py --loss=cross-entropy --model=resnet50dropout --drop=0.08702220252645132 --inv_temp=29.31590841184109 --lr-base=0.00016199535513680024 --unc-module=jsd --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
+```
+
+```
+train.py --loss=cross-entropy --model=vit_medium_patch16_gap_256dropout --drop=0.1334044009405148 --img-size=256 --inv_temp=57.13603169495254 --lr-base=0.0027583475549166764 --unc-module=class-entropy --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
+```
+
+### Ensemble
+
+Specify the number heads via ```--num-heads```. This increases memory and computation usage.
+
+```
+train.py --loss=cross-entropy --model=resnet50 --inv_temp=29.89825063351814 --lr-base=0.004405890102835956 --num-heads=10 --unc-module=class-entropy --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
+```
+
+```
+train.py --loss=cross-entropy --model=vit_medium_patch16_gap_256 --img-size=256 --inv_temp=54.435826404570726 --lr-base=0.004944771531139904 --num-heads=10 --unc-module=class-entropy --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
+```
+
+### Cross Entropy
+
+```
+train.py --loss=cross-entropy --model=resnet50 --inv_temp=31.353232263344143 --lr-base=0.0027583475549166764 --unc-module=class-entropy --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
+```
+
+```
+train.py --loss=cross-entropy --model=vit_medium_patch16_gap_256 --img-size=256 --inv_temp=60.70635770117517 --lr-base=0.004954014361368407 --unc-module=class-entropy --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
+```
+
+### InfoNCE
+
+InfoNCE requires ```--ssl=True```, and a lower batchsize, since we forward two self-supervised crops per image.
+
+```
+train.py --loss=infonce --model=resnet50 --ssl=True --accumulation_steps=21 --batch-size=96 --inv_temp=15.182859908025058 --lr-base=0.0004452562693472003 --unc-module=embed-norm --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
+```
+
+```
+train.py --loss=infonce --model=vit_medium_patch16_gap_256 --ssl=True --accumulation_steps=21 --batch-size=96 --img-size=256 --inv_temp=20.82011649785067 --lr-base=0.006246538808281836 --unc-module=embed-norm --unc_start_value=0 --freeze_backbone=false --freeze_classifier=false --epochs=32 --iters_instead_of_epochs=0 --stopgrad=false --opt=lamb --dataset=torch/imagenet
 ```
 
 ---
@@ -278,7 +306,7 @@ train.py --gp-cov-discount-factor=0.999 --gp-input-normalization=True --img-size
 
 ### Code
 
-This repo bases largely on [timm](https://github.com/huggingface/pytorch-image-models) (Apache 2.0), with some dataloaders from [Revisiting Deep Metric Learning](https://github.com/Confusezius/Revisiting_Deep_Metric_Learning_PyTorch) (MIT Licence), and some methods from [Probabilistic Contrastive Learning](https://github.com/mkirchhof/Probabilistic_Contrastive_Learning) (MIT License). Several further methods are (re-)implemented by ourselves. Overall, this repo is thus under an Apache 2.0 License. That said, it is your responsibility to ensure you comply with licenses here and conditions of any dependent licenses. Where applicable, the sources/references for various components are linked in docstrings.
+This repo bases largely on [timm](https://github.com/huggingface/pytorch-image-models) (Apache 2.0), with some dataloaders from [Revisiting Deep Metric Learning](https://github.com/Confusezius/Revisiting_Deep_Metric_Learning_PyTorch) (MIT Licence) and [VTAB](https://github.com/google-research/task_adaptation) (Apache 2.0), and some methods from [Probabilistic Contrastive Learning](https://github.com/mkirchhof/Probabilistic_Contrastive_Learning) (MIT License). Several further methods are (re-)implemented by ourselves. Overall, this repo is thus under an Apache 2.0 License. That said, it is your responsibility to ensure you comply with licenses here and conditions of any dependent licenses. Where applicable, the sources/references for various components are linked in docstrings.
 
 ### Pretrained Weights
 So far all of the pretrained weights available here are pretrained on ImageNet with a select few that have some additional pretraining (see extra note below). ImageNet was released for non-commercial research purposes only (https://image-net.org/download). It's not clear what the implications of that are for the use of pretrained weights from that dataset. Any models I have trained with ImageNet are done for research purposes and one should assume that the original dataset license applies to the weights. It's best to seek legal advice if you intend to use the pretrained weights in a commercial product.
@@ -290,7 +318,15 @@ Several weights included or references here were pretrained with proprietary dat
 
 ## Citing
 
+To cite the pretrained visual uncertainties models, use
+
+```commandline
+TODO
 ```
+
+To cite the URL benchmark, use
+
+```commandline
 @article{kirchhof2023url,
   title={URL: A Representation Learning Benchmark for Transferable Uncertainty Estimates},
   author={Michael Kirchhof and Bálint Mucsányi and Seong Joon Oh and Enkelejda Kasneci},
@@ -299,4 +335,8 @@ Several weights included or references here were pretrained with proprietary dat
 }
 ```
 
-If you use the benchmark, please also cite the datasets.
+If you use the benchmark, please also cite the datasets it uses.
+
+---
+
+_Disclaimer: This is not an officially supported Google product._

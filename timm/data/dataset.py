@@ -6,6 +6,8 @@ import io
 import logging
 from typing import Optional
 import math
+import h5py
+import os
 
 import torch
 import torch.utils.data as data
@@ -120,16 +122,17 @@ class IterableImageDataset(data.IterableDataset):
         self._consecutive_errors = 0
 
     def __iter__(self):
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is None:  # single-process data loading, return the full iterator
-            pass
-        else:
-            # We have multiple workers, split workload across them
-            n_per_worker = int(math.ceil(len(self.reader) / float(worker_info.num_workers)))
-            worker_id = worker_info.id
-            id_start = worker_id * n_per_worker
-            id_end = min(id_start + n_per_worker, len(self.reader))
-            self.reader.samples = self.reader.samples[id_start:id_end]
+        # TODO Fix this code for TFDS readers
+        #worker_info = torch.utils.data.get_worker_info()
+        #if worker_info is None:  # single-process data loading, return the full iterator
+        #    pass
+        #else:
+        #    # We have multiple workers, split workload across them
+        #    n_per_worker = int(math.ceil(len(self.reader) / float(worker_info.num_workers)))
+        #    worker_id = worker_info.id
+        #    id_start = worker_id * n_per_worker
+        #    id_end = min(id_start + n_per_worker, len(self.reader))
+        #    self.reader.samples = self.reader.samples[id_start:id_end]
 
         for img, target in self.reader:
             if self.transform is not None:
@@ -202,3 +205,28 @@ class AugMixDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.dataset)
+
+
+class HDF5Dataset(torch.utils.data.Dataset):
+    def __init__(self, root, hdf5_file_path):
+        self.hdf5_file = h5py.File(os.path.join(root, f"hdf5_{hdf5_file_path}", "dataset.hdf5"), 'r')
+        self.embed = self.hdf5_file['embed']
+        self.label = self.hdf5_file['label']
+
+    def __len__(self):
+        return len(self.embed)
+
+    def __getitem__(self, index):
+        return EmbeddingTensor(self.embed[index]), int(self.label[index].item())
+
+    def get_embed_dim(self):
+        if self.__len__() > 0:
+            return self.embed[0, :].shape[-1]
+        else:
+            return None
+
+
+class EmbeddingTensor(torch.Tensor):
+    # This is a Tensor, but it's called EmbeddingTensor so that we can handle it
+    # differently from normal tensors (that contain images)
+    pass

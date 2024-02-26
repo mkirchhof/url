@@ -58,6 +58,7 @@ def transforms_imagenet_train(
         re_mode='const',
         re_count=1,
         re_num_splits=0,
+        blur_prob=0.,
         separate=False,
         force_color_jitter=False,
 ):
@@ -101,6 +102,10 @@ def transforms_imagenet_train(
             secondary_tfl += [augment_and_mix_transform(auto_augment, aa_params)]
         else:
             secondary_tfl += [auto_augment_transform(auto_augment, aa_params)]
+
+    if blur_prob > 0:
+        secondary_tfl += [transforms.RandomApply([transforms.GaussianBlur([31, 31], [0.5, 5])],
+                                                 p=blur_prob)]
 
     if color_jitter is not None and not disable_color_jitter:
         # color jitter is enabled when not using AA or when forced
@@ -213,6 +218,7 @@ def create_transform(
         re_mode='const',
         re_count=1,
         re_num_splits=0,
+        blur_prob=0.,
         crop_pct=None,
         crop_mode=None,
         tf_preprocessing=False,
@@ -255,6 +261,7 @@ def create_transform(
                 re_mode=re_mode,
                 re_count=re_count,
                 re_num_splits=re_num_splits,
+                blur_prob=blur_prob,
                 separate=separate,
             )
         else:

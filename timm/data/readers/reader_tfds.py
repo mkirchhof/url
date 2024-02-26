@@ -13,6 +13,9 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 from PIL import Image
+import logging
+
+_logger = logging.getLogger(__name__)
 
 try:
     import tensorflow as tf
@@ -105,7 +108,10 @@ class ReaderTfds(Reader):
             target_img_mode='',
             prefetch_size=None,
             shuffle_size=None,
-            max_threadpool_size=None
+            max_threadpool_size=None,
+            n_few_shot=None,
+            decoder="default",
+            postprocess_fn=None
     ):
         """ Tensorflow-datasets Wrapper
 
@@ -154,6 +160,9 @@ class ReaderTfds(Reader):
         self.class_to_idx = get_class_labels(self.builder.info) if self.target_name == 'label' else {}
         self.split_info = self.builder.info.splits[split]
         self.num_samples = self.split_info.num_examples
+        self.n_few_shot = n_few_shot
+        self.postprocess_fn = postprocess_fn
+        self.decoder = {self.input_name: decode_example()} if decoder == "default" else decoder
 
         # Distributed world state
         self.dist_rank = 0
@@ -250,8 +259,8 @@ class ReaderTfds(Reader):
         )
         ds = self.builder.as_dataset(
             split=self.subsplit or self.split,
-            shuffle_files=self.is_training,
-            decoders=dict(image=decode_example()),
+            shuffle_files=False,
+            decoders=self.decoder,
             read_config=read_config,
         )
         # avoid overloading threading w/ combo of TF ds threads + PyTorch workers
@@ -260,6 +269,37 @@ class ReaderTfds(Reader):
         getattr(options, thread_member).private_threadpool_size = max(1, self.max_threadpool_size // self.num_workers)
         getattr(options, thread_member).max_intra_op_parallelism = 1
         ds = ds.with_options(options)
+        if self.postprocess_fn is not None:
+            ds = ds.map(self.postprocess_fn)
+        if self.n_few_shot is not None:
+            assert self.global_num_workers == 1, "VTAB few-shot learning only works with --workers=1 for tensorflow reasons"
+            # TFDS does not natively support few-shot filtering.
+            # As a workaround, we iterate over the dataset to get (image idx, label) pairs,
+            # then get the few-shot image idx, then filter the dataset.
+            ds = ds.enumerate()  # Add unique index to dataset
+            class_count = {}
+            selected_idxes = []
+            for idx, x in ds.as_numpy_iterator():
+                y = x[self.target_name]
+                if y not in class_count:
+                    class_count[y] = 0
+                if class_count[y] < self.n_few_shot:
+                    selected_idxes.append(idx)
+                    class_count[y] = class_count[y] + 1
+            keys_tensor = tf.constant(selected_idxes)
+            vals_tensor = tf.ones_like(keys_tensor)
+            table = tf.lookup.StaticHashTable(
+                tf.lookup.KeyValueTensorInitializer(keys_tensor, vals_tensor),
+                default_value=0)  # If index not in table, return 0.
+            def hash_table_filter(index, value):
+                table_value = table.lookup(tf.cast(index, tf.int32))  # 1 if index in arr, else 0.
+                index_in_arr = tf.cast(table_value, tf.bool)  # 1 -> True, 0 -> False
+                return index_in_arr
+            ds = ds.filter(hash_table_filter)
+            ds = ds.map(lambda idx, value: value)  # drop index
+
+            if len([value for key, value in class_count.items() if value != self.n_few_shot]) > 0:
+                _logger.warning(f"Not all classes have the desired {self.n_few_shot}-shot examples. Continuing anyways.")
         if self.is_training or self.repeats > 1:
             # to prevent excessive drop_last batch behaviour w/ IterableDatasets
             # see warnings at https://pytorch.org/docs/stable/data.html#multi-process-data-loading

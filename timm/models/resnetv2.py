@@ -547,7 +547,18 @@ class ResNetV2(nn.Module):
 
     @torch.jit.ignore
     def get_classifier(self):
-        return self.head.fc
+        class UnflattenClassifier(nn.Module):
+            def __init__(self, classifier):
+                super().__init__()
+                self.classifier = classifier
+                self.flatten = nn.Flatten(1)
+
+            def forward(self, x, *args, **kwargs):
+                if len(x.shape) == 2:
+                    x = x.unsqueeze(-1).unsqueeze(-1)
+                return self.flatten(self.classifier.forward(x, *args, **kwargs))
+
+        return UnflattenClassifier(self.head.fc)
 
     def reset_classifier(self, num_classes, global_pool='avg'):
         self.num_classes = num_classes

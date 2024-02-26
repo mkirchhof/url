@@ -7,32 +7,21 @@ canonical PyTorch, standard Python style, and good performance. Repurpose as you
 
 Hacked together by Ross Wightman (https://github.com/rwightman)
 """
-import argparse
-import csv
-import glob
-import json
 import logging
 import os
 import time
 from collections import OrderedDict
 from contextlib import suppress
-from functools import partial
 import numpy as np
 from scipy.stats import spearmanr
 from torchmetrics.functional.classification import binary_auroc as auroc
 
 import torch
-import torch.nn as nn
 import torch.nn.parallel
 import torchvision.transforms.functional as func_transforms
-
-from timm.data import create_dataset, create_loader, resolve_data_config, RealLabelsImagenet
-from timm.layers import apply_test_time_pool, set_fast_norm
-from timm.models import create_model, load_checkpoint, is_model, list_models
-from timm.utils import accuracy, AverageMeter, natural_key, setup_default_logging, set_jit_fuser, \
-    decay_batch_step, check_batch_size_retry, ParseKwargs, pct_cropped_has_bigger_uncertainty, is_pred_correct, \
-    reduce_tensor, str2bool, recall_at_one, save_image
-from timm.loss import CrossEntropy
+from timm.utils import accuracy, AverageMeter, pct_cropped_has_bigger_uncertainty, is_pred_correct, \
+    reduce_tensor, recall_at_one, save_image
+from timm.data.dataset import HDF5Dataset
 
 try:
     from apex import amp
@@ -108,12 +97,16 @@ def validate_one_epoch(
     dataset_name = dataset_name.replace('/', '_')
 
     # Fix the random crops for deteriorating each image
-    filepath = f'timm/data/randomcrops_{len(loader.dataset)}_{args.crop_min}_{args.crop_max}.csv'
-    if os.path.exists(filepath):
-        center_crop = np.loadtxt(filepath, delimiter=",")
+    if isinstance(loader.dataset, HDF5Dataset):
+        compare_with_cropped_image = False
     else:
-        center_crop = np.random.random(len(loader.dataset)) * (args.crop_max - args.crop_min) + args.crop_min
-        np.savetxt(filepath, center_crop, delimiter=",")
+        compare_with_cropped_image = True
+        filepath = f'timm/data/randomcrops_{len(loader.dataset)}_{args.crop_min}_{args.crop_max}.csv'
+        if os.path.exists(filepath):
+            center_crop = np.loadtxt(filepath, delimiter=",")
+        else:
+            center_crop = np.random.random(len(loader.dataset)) * (args.crop_max - args.crop_min) + args.crop_min
+            np.savetxt(filepath, center_crop, delimiter=",")
 
     # Track metrics
     batch_time = AverageMeter()
@@ -128,6 +121,7 @@ def validate_one_epoch(
     uncertainties = torch.zeros(n_data)
     uncertainties_c = np.zeros(n_data)
     correctness = torch.zeros(n_data)
+    classification_correctness = torch.zeros(n_data)
     all_features = np.zeros((n_data, model.num_features), dtype="float32")
     all_targets = np.zeros(n_data)
 
@@ -138,15 +132,16 @@ def validate_one_epoch(
     cur_idx = 0
     with torch.no_grad():
         for batch_idx, (input, target) in enumerate(loader):
-            # Add cropped inputs
-            input_c = torch.zeros_like(input)
-            c_sizes = torch.zeros(input.shape[0])
-            for i in range(input.shape[0]):
-                # Crop each image individually because torchvision cannot do it batch-wise
-                crop_size = int(round(min(input.shape[2], input.shape[3]) * center_crop[cur_idx + i]))
-                c_sizes[i] = crop_size
-                input_c[i] = func_transforms.resize(func_transforms.center_crop(input[i], [crop_size]),
-                                                    [input.shape[2], input.shape[3]])
+            if compare_with_cropped_image:
+                # Add cropped inputs
+                input_c = torch.zeros_like(input)
+                c_sizes = torch.zeros(input.shape[0])
+                for i in range(input.shape[0]):
+                    # Crop each image individually because torchvision cannot do it batch-wise
+                    crop_size = int(round(min(input.shape[2], input.shape[3]) * center_crop[cur_idx + i]))
+                    c_sizes[i] = crop_size
+                    input_c[i] = func_transforms.resize(func_transforms.center_crop(input[i], [crop_size]),
+                                                        [input.shape[2], input.shape[3]])
 
             if args.no_prefetcher:
                 target = target.to(device)
@@ -176,7 +171,8 @@ def validate_one_epoch(
             # compute output
             with amp_autocast():
                 output, unc, features = model(input)
-                _, unc_c, _ = model(input_c)
+                if compare_with_cropped_image:
+                    _, unc_c, _ = model(input_c)
 
                 # augmentation reduction
                 reduce_factor = args.tta
@@ -195,8 +191,17 @@ def validate_one_epoch(
             batch_time.update(time.time() - end, n=input.shape[0])
             end = time.time()
 
+            # Save some images
+            #for i in range(input.shape[0]):
+            #    if target[i].cpu().item() in {16: 0, 35: 1, 36: 2, 15: 3, 29: 4, 19: 5}:
+            #        save_image(input[i].cpu(), "", path=f"{tempfolder}/{dataset_name}_idx_{i + cur_idx}_class_{target[i]}.png")
+            #save_image(input[unc.argmin().cpu().numpy()].cpu(), "", path=f"{tempfolder}/{unc.min().cpu().item():.3f}_{dataset_name}_example.png")
+            #save_image(input[unc.argmax().cpu().numpy()].cpu(), "", path=f"{tempfolder}/{unc.max().cpu().item():.3f}_{dataset_name}_example.png")
+
             # measure accuracy and record loss
             acc1, acc5 = accuracy(output.detach(), target, topk=(1, 5))
+            class_correctness = output.argmax(dim=1) == target
+            classification_correctness[cur_idx:(cur_idx + input.shape[0])] = class_correctness.detach().cpu().squeeze()
             if args.distributed:
                 #reduced_loss = reduce_tensor(loss.data, args.world_size)
                 acc1 = reduce_tensor(acc1, args.world_size)
@@ -210,9 +215,10 @@ def validate_one_epoch(
 
             # Measure uncertainty metrics
             # TODO Might need to adjust this when using distributed evaluation
-            cBiggerUnc = pct_cropped_has_bigger_uncertainty(unc.detach(), unc_c.detach())
-            cropped_has_bigger_unc.update(cBiggerUnc.item(), input.size(0))
-            uncertainties_c[cur_idx:(cur_idx + input.shape[0])] = unc_c.detach().cpu().squeeze()  # store for calculating rank correlation later
+            if compare_with_cropped_image:
+                cBiggerUnc = pct_cropped_has_bigger_uncertainty(unc.detach(), unc_c.detach())
+                cropped_has_bigger_unc.update(cBiggerUnc.item(), input.size(0))
+                uncertainties_c[cur_idx:(cur_idx + input.shape[0])] = unc_c.detach().cpu().squeeze()  # store for calculating rank correlation later
             uncertainties[cur_idx:(cur_idx + input.shape[0])] = unc.detach().cpu().squeeze()  # store for calculating AUROC later
             correctness[cur_idx:(cur_idx + input.shape[0])] = is_pred_correct(output, target).detach().cpu().squeeze()  # for AUROC later
 
@@ -331,18 +337,47 @@ def validate_one_epoch(
     # Metrics only on current dataset
 
     # Recall@1
+    # Comment: Here we completely override the previously defined "correctness"
+    # tensor. (L433) Is that the intended behavior or did you want to use the previous
+    # one somewhere?
+    # Answer: It's intended behaviour, since we switched from calculating AUROC w.r.t. Accuracy to
+    # AUROC w.r.t. R@1, but I agree that we should remove the old code.
+
+
+    #np.savetxt(f"{dataset_name}_features.csv", all_features, delimiter=",")
+    #np.savetxt(f"{dataset_name}_targets.csv", all_targets, delimiter=",")
+    #np.savetxt(f"{dataset_name}_unc.csv", uncertainties, delimiter=",")
+
     recall, correctness = recall_at_one(all_features, all_targets, mode="faiss")
 
+    # Safe recall experiments
+    #certain_idxes = []
+    #for c_idx in np.unique(all_targets):
+    #    threshold = np.quantile(uncertainties[all_targets == c_idx], 0.90)
+    #    certain_idxes.extend([idx for idx in np.arange(len(all_targets))[all_targets == c_idx] if uncertainties[idx] <= threshold])
+    #recall_safe_database,_ = recall_at_one(all_features, all_targets, mode="faiss", idxes_database=certain_idxes)
+    #recall_safe_database_and_queries,_ = recall_at_one(all_features, all_targets, mode="faiss", idxes_database=certain_idxes, idxes_query=certain_idxes)
+    #recall_safe_queries, _ = recall_at_one(all_features, all_targets, mode="faiss", idxes_query=certain_idxes)
+    #print(recall, recall_safe_database, recall_safe_database_and_queries, recall_safe_queries)
+
     # Calculate rank correlation between crop amount and pred uncertainty
-    rcorr_crop_unc = spearmanr(-uncertainties_c, center_crop)[0]
+    rcorr_crop_unc = spearmanr(-uncertainties_c, center_crop)[0] if compare_with_cropped_image else None
 
     # Calculate predictive uncertainty metric
     auroc_correct = auroc(-uncertainties, torch.from_numpy(correctness).int()).item()
+
+    # Calculate predictive uncertainty w.r.t. classification (not R@1)
+    auroc_classification = auroc(-uncertainties, classification_correctness.int()).item()
 
     # Some summary statistics about uncertainties
     min_unc = uncertainties.min().item()
     avg_unc = uncertainties.mean().item()
     max_unc = uncertainties.max().item()
+    unc_q10 = np.quantile(uncertainties, 0.1).item()
+    unc_q25 = np.quantile(uncertainties, 0.25).item()
+    unc_q50 = np.quantile(uncertainties, 0.50).item()
+    unc_q75 = np.quantile(uncertainties, 0.75).item()
+    unc_q90 = np.quantile(uncertainties, 0.9).item()
 
     results = OrderedDict(
         model=args.model,
@@ -350,12 +385,20 @@ def validate_one_epoch(
         r1=round(recall, 4),
         top5=round(top5.avg, 4),
         croppedHasBiggerUnc=round(cropped_has_bigger_unc.avg, 4),
-        rcorr_crop_unc=round(rcorr_crop_unc, 4),
+        rcorr_crop_unc=round(rcorr_crop_unc, 4) if compare_with_cropped_image else None,
         auroc_correct=round(auroc_correct, 4),
+        auroc_classification=round(auroc_classification, 4),
         min_unc=min_unc,
         max_unc=max_unc,
         avg_unc=avg_unc,
         time_per_sample=batch_time.avg,
+        unc_q10=unc_q10,
+        unc_q25=unc_q25,
+        unc_q50=unc_q50,
+        unc_q75=unc_q75,
+        unc_q90=unc_q90,
+        unc_iqr_90_10=unc_q90 - unc_q10,
+        unc_iqr_75_25=unc_q75 - unc_q25
     )
 
     # Calculate rank corr with gt entropy (if possible)
