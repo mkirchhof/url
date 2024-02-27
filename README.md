@@ -320,13 +320,18 @@ Several weights included or references here were pretrained with proprietary dat
 
 To cite the pretrained visual uncertainties models, use
 
-```commandline
-TODO
+```
+@article{kirchhof2024pretrained,
+      title={Pretrained Visual Uncertainties}, 
+      author={Michael Kirchhof and Mark Collier and Seong Joon Oh and Enkelejda Kasneci},
+      journal={arXiv preprint arXiv:2402.16569},
+      year={2024}
+}
 ```
 
 To cite the URL benchmark, use
 
-```commandline
+```
 @article{kirchhof2023url,
   title={URL: A Representation Learning Benchmark for Transferable Uncertainty Estimates},
   author={Michael Kirchhof and Bálint Mucsányi and Seong Joon Oh and Enkelejda Kasneci},
